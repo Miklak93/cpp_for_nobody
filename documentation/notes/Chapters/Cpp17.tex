@@ -1,0 +1,1019 @@
+\documentclass[../main]{subfiles}
+
+\begin{document}
+\chapter{C++17}
+\section{Basics}
+\subsection{\texttt{if} and \texttt{switch} with initialization}
+    Since C++17 both \texttt{if} and \texttt{switch} statements can be equipped with \textbf{initialization}.
+\begin{Code}
+    #include <iostream>
+    #include <random>
+    #include <string>
+    #include <utility>
+    
+    const int EXPECTED = 2;
+    
+    int get_random()
+    {
+        std::random_device device;
+        std::mt19937 engine { device() };
+        std::uniform_int_distribution<std::mt19937::result_type> dstr(0, 4);
+        
+        return dstr(engine);
+    }
+    
+    inline bool more_than(int value, int expected)
+    {
+        return value > expected;
+    }
+    
+    int main()
+    {
+        /* Initialization in if statement */
+        if (int value = get_random(); more_than(value, EXPECTED)) 
+        {
+            std::cout << value << " > " << EXPECTED << std::endl;
+        }
+        else
+        {
+            std::cout << value << " < " << EXPECTED << std::endl;
+        }
+
+        /* Initialization in switch statement */
+        switch (int value = get_random(); more_than(value, EXPECTED))
+        {
+            case true:
+                std::cout << value << " > " << EXPECTED << std::endl;
+                break;
+            default:
+                std::cout << value << " < " << EXPECTED << std::endl;
+        }
+    
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{constexpr if}}
+    The compile-time \texttt{if} opens the door to use conditional statements during compilation. The big difference between standard \texttt{if} is that we usually need to use
+\texttt{else} complementary part explicitly.
+\begin{Code}
+    #include <string>
+    
+    template <int value>
+    auto function()
+    {
+        if constexpr (value > 0)
+        {
+            return value; 
+        }
+        return std::string { "0" };
+    }
+    
+    int main()
+    {
+        function<0>();
+        
+        /* Won't compile */
+        // function<1>();
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+Observe that the condition \texttt{value < 0} discards \texttt{if constexpr} so \texttt{std::string} is the only one deduced type. The situation is drastically different when we
+use \texttt{value > 0} - in that case, \texttt{if constexpr} is fulfilled, and then two different types i.e. \texttt{int} and \texttt{std::string} are deduced as
+return value. This is the reason for the failure. To correct it, we need to add the \texttt{else} clause
+
+\begin{Code}
+    #include <string>
+    
+    template <int value>
+    auto function()
+    {
+        if constexpr (value > 0)
+        {
+            return value; 
+        }
+        else
+        {
+            return std::string { "0" };
+        }
+    }
+    
+    int main()
+    {
+        std::string str = function<0>();
+        int i = function<1>();
+        
+        return 0;
+    }
+\end{Code}
+\noindent
+When \texttt{value > 0} the condition \texttt{if constexpr} is fulfilled but \texttt{else} discarded, thus there is no conflict for the return value.\newline
+
+    Besides making \texttt{type\_traits} much more convenient to write, it allows to construct functions with different return type
+\begin{Code}
+template <int value>
+auto function()
+{
+    if constexpr (value > 0)
+    {
+        return value;
+    }
+}
+\end{Code}
+\noindent
+This function returns either \texttt{int} or \texttt{void} depending on whether \texttt{value} is positive or not. As a for regular \texttt{if},
+its compile-time counterpart supports the initialization statement.\newline
+
+    At the end, it is, of course, possible to use \texttt{if else} clause
+\begin{Code}
+    #include <iostream>
+    #include <type_traits>
+    
+    template <typename T>
+    void check_type()
+    {
+        if constexpr (std::is_same_v<T, int>)
+        {
+            std::cout << "int" << std::endl;
+        }
+        else if constexpr (std::is_same_v<T, float>)
+        {
+            std::cout << "float" << std::endl;
+        }
+        else if constexpr (std::is_same_v<T, double>)
+        {
+            std::cout << "double" << std::endl;
+        }
+        /* Required ! */
+        else
+        {
+            std::cout << "Unknown type" << std::endl;
+        }
+    }
+    
+    int main()
+    {
+        /* Prints "int" */
+        check_type<int>();
+        
+        /* Prints "float" */
+        check_type<float>();
+        
+        /* Prints "double" */
+        check_type<double>();
+        
+        /* Prints "Unknown type" */
+        check_type<char>();
+    
+        return 0;
+    }
+\end{Code}
+
+\section{Functions}
+    From now lambdas achieve a few more possibilities
+\begin{itemize}
+    \item they are \texttt{constexpr} by default and if possible we can use them as usual \texttt{consexpr} functions.
+    \begin{Code}
+        #include <iostream>
+        #include <type_traits>
+        
+        auto is_negative = [](auto value) { return value < 0; };
+        
+        template <int value,
+                  std::enable_if_t<is_negative(value), bool> = true>
+        int absolute_value()
+        {
+            return -value;
+        }
+        
+        template <int value,
+                  std::enable_if_t<!is_negative(value), bool> = true>
+        int absolute_value()
+        {
+            return value;
+        }
+        
+        int main()
+        {
+            /* Prints "1" */
+            std::cout << absolute_value<-1>() << std::endl;
+
+            /* Prints "0" */
+            std::cout << absolute_value<0>() << std::endl;
+            
+            /* Prints "1" */
+            std::cout << absolute_value<1>() << std::endl;
+        
+            return 0;
+        }
+        \end{Code}
+    \item In C++11 and C++14 passing [\&], [=] or [this] always allows to modify class, because the copy of the \texttt{this} pointer. C++17 fills this gap
+    by introducing \texttt{[*this]} expression
+    \begin{Code}
+        #include <iostream>
+
+        struct Data
+        {
+            int value { 0 };
+            
+            void modify()
+            {
+                /* Instant call of lambda */
+                [copy=*this] () mutable { copy.value = 1; } ();
+            }
+        };
+        
+        int main()
+        {
+            Data data;
+            data.modify();
+            
+            /* Remains untouched so prints "0" */
+            std::cout << data.value << std::endl;
+        
+            return 0;
+        }
+    \end{Code}
+    \noindent
+    Remember about it when you're working with multithreading.
+\end{itemize}
+
+\section{Classes}
+\subsection{Inline variables}
+    Before C++17 there was no way to initialize \textbf{non-\texttt{const}}
+    \footnote{For \texttt{const} case we can initialize member inside.}
+static members inside a class if this class is in the header file
+
+    \begin{Code}
+        struct Struct
+        {
+            static int counter {};
+        };
+
+        /* Compilation gives error
+         * "error: ISO C++ forbids in-class initialization of
+         * non-const static member ‘Struct::counter’"
+         */
+        int main()
+        {
+            return 0;
+        }
+    \end{Code}
+
+    We could move the definition outside of the class and that will
+work
+    \subsubsection{\textit{header.h}}
+    \begin{Code}
+        #pragma once
+        
+        struct Struct
+        {
+            static int counter;
+        };
+
+        int Struct::counter = 0;
+    \end{Code}
+    
+    \subsubsection{\textit{main.cpp}}
+    \begin{Code}
+        #include "header.h"
+        
+        int main()
+        {
+            return 0;
+        }
+    \end{Code}
+but what if we include the same header in another \textit{.cpp} file ?
+    \subsubsection{\textit{includer.cpp}}
+    \begin{Code}
+        #include "header.h"
+    \end{Code}
+In such a case the compilation will end with error
+\textit{multiple definition of `Struct::counter'}.\newline
+
+    Since C++17 we have a solution in the form of
+\textbf{\texttt{inline} variable}
+\begin{Code}
+    #include <iostream>
+    
+    struct Struct
+    {
+        Struct()
+        {
+            std::cout << "Struct " << ++counter << " created\n";
+        }
+        
+        ~Struct()
+        {
+            std::cout << "Struct " << counter-- << " destroyed\n";
+        }
+
+        /* static inline variable */
+        static inline int counter { 0 };
+    };
+    
+    int main()
+    {
+        /* Prints "Struct 1 created" */
+        Struct s1;
+        {
+            /* Prints "Struct 2 created" */
+            Struct s2;
+            {
+                /* Prints "Struct 3 created" */
+                Struct s3;
+            }
+            /* Prints "Struct 3 destroyed" */
+        }
+        /* Prints "Struct 2 destroyed" */
+        
+        return 0;
+        /* Prints "Struct 1 destroyed" */
+    }
+\end{Code}
+That could be handy with \texttt{thread\_local} keyword - threads won't share the same object anymore. Moreover, \texttt{constexpr}
+implies \texttt{inline}, thus
+\begin{Code}
+    static inline constexpr int value { 0 };
+\end{Code}
+means the same as
+\begin{Code}
+    static constexpr int value { 0 };
+\end{Code}
+
+\subsection{Aggregate}
+    Since C++17, aggregates can have base classes, so that for such structures being derived from other
+classes or structures list initialization is allowed. From now the definition of aggregate changed and now the \textit{aggregate} means
+\begin{itemize}
+    \item either an array,
+    \item or a class type (class, struct, or union) with:
+    \begin{itemize}
+        \item no user-declared or explicit constructor
+        \item no constructor inherited by a \texttt{using} declaration
+        \item no private or protected non-static data members
+        \item no virtual functions
+        \item no virtual, private, or protected base classes
+    \end{itemize}
+\end{itemize}
+
+\begin{Code}
+    #include <string>
+    
+    struct AggregateBase
+    {
+        int i;
+        float f;
+    };
+    
+    struct AggregateDerived : AggregateBase
+    {
+        std::string string;
+    };
+    
+    int main()
+    {
+        /* Base class can have separate parenthesis */
+        AggregateDerived derived0 { { 0, 0.0 }, "str0" };
+        
+        /* But we don't need to use them */
+        AggregateDerived derived1 { 1, 1.1, "str1" };
+        
+        /* We can skip initial values - missing ones
+         * will be zero-initialized
+         */
+        AggregateDerived derived3;
+        AggregateDerived derived4 { 4, 4.4 };
+        AggregateDerived derived5 { { 5 }, "str5" };
+        
+        return 0;
+    }
+\end{Code}
+
+    Aggregates extend over derived classes from non-aggregates. This
+isn't a surprise as a derived class ''holds'' the base class object
+inside 
+\begin{Code}
+    #include <string>
+    
+    struct AggregateString : std::string
+    {
+        int i;
+    };
+    
+    int main()
+    {
+        AggregateString aggregate0 { { "str0" }, 0 };
+        AggregateString aggregate1 { {  }, 1 };
+        
+        return 0;
+    }
+\end{Code}
+\noindent
+or even multiple classes
+\begin{Code}
+    #include <string>
+    #include <vector>
+    
+    struct AggregateMultipleBase : std::string, std::vector<int>
+    {
+        int i;
+    };
+    
+    int main()
+    {
+        AggregateMultipleBase derived0 { { "str0" }, { 1, 2, 3 }, 0 };
+        AggregateMultipleBase derived1 { "str1", {},  1 };
+        
+        return 0;
+    }
+    
+\end{Code}
+
+\subsection{Structured bindings}
+    Structured bindings can be used for structures with public data members, raw C-style arrays, and \textit{tuple-like objects:}
+\begin{itemize}
+    \item If in structures and classes, all non-static data members are public, you can bind each non-static
+    data member to exactly one name.
+    \item For raw arrays, you can bind a name to each element.
+    \item For any type you can use a tuple-like API to bind names to whatever the API defines as “elements.”
+    The API roughly consists of the following elements for a type type:
+    \begin{itemize}
+        \item \texttt{std::tuple\_size<type>::value} has to return the number of elements.
+        \item \texttt{std::tuple\_element<idx,type>::type} has to return the type of the idx-th element.
+        \item A global or member \texttt{get<idx>()} has to yield the value if the idx-th element.
+    \end{itemize}
+    The standard library types \texttt{std::pair}, \texttt{std::tuple}, and \texttt{std::array} already provide this API.
+\end{itemize}
+
+    To understand structured bindings, be aware that there is a new anonymous
+variable involved. The new names introduced as structure bindings refer to members or elements of this
+anonymous object. The exact behavior of an initialization
+\begin{Code}
+    struct Data
+    {
+        type1 i;
+        type2 s;
+    } data;
+    
+    auto [u,v] = data;
+\end{Code}
+is as we’d initialize a new entity \texttt{entity} with \texttt{data} and let the structured bindings \texttt{u} and \texttt{v} become
+alias names for the members of this new object, similar to defining
+\begin{Code}
+    auto entity = data;
+    aliasname u = entity.i;
+    aliasname v = entity.s;
+\end{Code}
+\noindent
+Note that \texttt{u} and \texttt{v} are not references to \texttt{entity.i} and \texttt{entity.s}, respectively. They are just other names for the
+members. Thus, \texttt{decltype(u)} is the type of the member \texttt{i} and \texttt{decltype(v)} is the type of the member \texttt{s}.
+
+\subsubsection{Qualifiers}
+    We can use qualifiers, such as \texttt{const} or \texttt{volatile} and references. Again, these qualifiers apply to the anonymous entity as a whole
+\begin{Code}
+    const auto& [u,v] = data;
+\end{Code}
+\noindent
+Qualifiers don’t necessarily apply to the structured bindings. Both
+\texttt{u} and \texttt{v} are declared as references and this only
+specifies that the anonymous entity is a reference -
+\texttt{u} and \texttt{v} have the type of the members of
+\texttt{data}.\newline
+
+    Structured bindings \textbf{do not \textit{decay}}
+\footnote{The \textit{decay} is the type same as when arguments are 
+passed by value, which means that raw arrays convert to pointer and
+top-level qualifiers, such as \texttt{const} and references, are ignored.}
+although \texttt{auto} is used. Look at the following example
+\begin{Code}
+    struct Struct
+    {
+        const char x[6];
+        const char y[3];
+    };
+    
+    Struct s{};
+    auto [u, v] = s;
+\end{Code}
+the type of \texttt{u} and \texttt{v} is \texttt{const char[6]} and 
+\texttt{const char[3]} respectively since
+\textbf{\texttt{auto} doesn't decay in  this case}
+\footnote{Compare it with \ref{Auto and pointers} section}.
+\begin{Code}
+    #include <iostream>
+    #include <type_traits>
+    
+    struct Struct
+    {
+        const char x[6];
+        const char y[3];
+    };
+    
+    int main()
+    {
+        Struct s{};
+        auto [u, v] = s;
+        
+        /* Prints "1" */
+        std::cout << std::is_same_v<decltype(u), const char[6]> << std::endl;
+        
+        /* Prints "1" */
+        std::cout << std::is_same_v<decltype(v), const char[3]> << std::endl;
+        return 0;
+    }    
+\end{Code}
+
+\subsubsection{Structured binding with classes}
+    Note that there is only limited usage of inheritance possible - all non-static data members must be members of the same class definition. Therefore, they have to be direct members of the type or
+the same unambiguous public base class
+\begin{Code}
+    struct Base
+    {
+        int a {1};
+        int b {2};
+    };
+
+    struct Derived : Base {};
+
+    int main()
+    {
+        /* Copy of values - everything works */
+        auto [u, v] = Derived{};
+        return 0;
+    }
+\end{Code}
+\noindent
+The code above compiles without any problem, but
+\begin{Code}
+    struct Base
+    {
+        int a {1};
+        int b {2};
+    };
+
+    struct Derived : Base
+    {
+        int c = {3};
+    };
+
+    int main()
+    {
+        /* Won't compile */
+        // auto [u, v, z] = Derived {};
+    }
+\end{Code}
+do not compile - the error says \textit {cannot decompose class type ‘Derived’: both it and its base class ‘Base’ have non-static data members}.\newline
+
+    The C++ language provides a way how to manually implement structured bindings for user-defined types.
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <utility>
+    
+    class Class
+    {
+    public:
+        Class(std::string str1, std::string str2, long val):
+            m_str1 ( std::move(str1) ),
+            m_str2 ( std::move(str2) ),
+            m_val ( val )
+    {
+    }
+    
+    const std::string& get_str1() const
+    {
+        return m_str1;
+    }
+    
+    std::string& get_str1()
+    {
+        return m_str1;
+    }
+    
+    const std::string& get_str2() const
+    {
+        return m_str2;
+    }
+    
+    std::string& get_str2()
+    {
+        return m_str2;
+    }
+    
+    const long& get_val() const
+    {
+        return m_val;
+    }
+    
+    long& get_val()
+    {
+        return m_val;
+    }
+        
+    private:
+        std::string m_str1;
+        std::string m_str2;
+        long m_val;
+    };
+    
+    /* Most important part - specialization for user-defined class */
+    template <>
+    struct std::tuple_size<Class>
+    {
+        static constexpr std::size_t value = 3;
+    };
+    
+    template <std::size_t Idx>
+    struct std::tuple_element<Idx, Class>
+    {
+        using type = std::string;
+    };
+    
+    template <>
+    struct std::tuple_element<2, Class>
+    {
+        using type  = long;
+    };
+    
+    /* The function name must be get!
+     * decltype(auto) is crucial. Firstly, auto is needed
+     * since we return different types from this function.
+     * Secondly, decltype(auto) do not decay - we return
+     * references here.
+     */
+    template <std::size_t N>
+    decltype(auto) get(Class& c)
+    {
+        static_assert(N < 3, "Class has only three elements!");
+        if constexpr (N == 2)
+        {
+            return c.get_val();
+        }
+        else if constexpr (N == 1)
+        {
+            return c.get_str2();
+        }
+        else
+        {
+            return c.get_str1();
+        }
+    }
+    
+    template <std::size_t N>
+    decltype(auto) get(const Class& c)
+    {
+        static_assert(N < 3, "Class has only three elements!");
+        if constexpr (N == 2)
+        {
+            return c.get_val();
+        }
+        else if constexpr (N == 1)
+        {
+            return c.get_str2();
+        }
+        else
+        {
+            return c.get_str1();
+        }
+    }
+    
+    template <std::size_t N>
+    decltype(auto) get(Class&& c)
+    {
+        static_assert(N < 3, "Class has only three elements!");
+        if constexpr (N == 2)
+        {
+            return std::move(c.get_val());
+        }
+        else if constexpr (N == 1)
+        {
+            return std::move(c.get_str2());
+        }
+        else
+        {
+            return std::move(c.get_str1());
+        }
+    }
+    
+    int main()
+    {
+        Class c { "str1", "str2", 0 };
+        
+        const auto& [cstr1, cstr2, cval] = c;
+        
+        /* Prints "str1" */
+        std::cout << cstr1 << std::endl;
+        
+        /* Prints "str2" */
+        std::cout << cstr2 << std::endl;
+        
+        /* Prints "0" */
+        std::cout << cval << std::endl;
+        
+        auto& [str1, str2, val] = c;
+        str1 = "mod str1";
+        str2 = "mod str2";
+        val = 1;
+        
+        auto&& [mstr1, mstr2, mval] = c;
+        
+        /* Prints "mod str1" */
+        std::cout << mstr1 << std::endl;
+        
+        /* Prints "mod str2" */
+        std::cout << mstr2 << std::endl;
+        
+        /* Prints "mod str1" */
+        std::cout << mval << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+\subsection{Template argument deduction}
+    Before C++17 template argument deduction was allowed only for functions. In C++17 this constraint was relaxed and now a compiler
+can deduce class template parameters as well.
+\begin{Code}
+    std::vector vector {1, 2};
+\end{Code}
+\noindent
+    This will not work if we use different types, since
+\texttt{std::vector<T>} expects a homogenous type
+\begin{Code}
+    std::vector vector {1, 2.5, "str"};
+\end{Code}
+but will work for a variadic-template types
+\begin{Code}
+    std::tuple { 1, 2.5, "str"};
+\end{Code}
+
+    Not all differences between functions and classes are resolved in C++17 - it still doesn't support partial template argument
+deduction but there is a question if it should, since in the following example
+\begin{Code}
+    std::tuple<int> tuple { 0, 1 };
+\end{Code}
+we don't know whether it was intentional or accidental to pass two arguments but define just one type.\newline
+
+    \textbf{Type deduction prefers copy initialization if some expression could be interpreted that way}
+\begin{Code}
+    std::vector vector1 {1, 2};
+    /* vector2 = std::vector<int> { 1, 2 } so copy */
+    std::vector vector2 { vector1 };
+\end{Code}
+\noindent
+When the expression cannot be interpreted as a copy, C++17 uses type deduction
+\begin{Code}
+    std::vector vector1 {1, 2};
+    /* vector2 = std::vector<std::vector<int>> { vector1, vector1 }; */
+    std::vector vector2 { vector1, vector1 };
+\end{Code}
+
+    There is one corner case. Let's look at the example given below
+\begin{Code}
+    #include <vector>
+    
+    template <typename... Args>
+    auto make_vector(const Args&... args)
+    {
+        return std::vector { args... };
+    }
+    
+    int main()
+    {
+        std::vector vector1 { 1, 2 };
+        /* Is it the copy or the vector of vectors? */
+        std::vector vector2 = make_vector(vector1);
+    
+        return 0;
+    }
+\end{Code}
+In such cases, a compiler producer can decide what to do, as the standard does not define the exact rules to follow.\newline
+
+\subsubsection{Deduction guides}
+    Due to the automatic deduction in classes, helper functions like \texttt{std::make\_pair}, \texttt{std::make\_unique}, which were designed for
+type deduction, seem to be redundant. But they still do something more than type deduction - they \textbf{decay}.
+
+\begin{Code}
+    /* [auto] = std::pair<const char*, const char*> */
+    auto pair = std::make_pair("str1", "str2");
+\end{Code}
+\noindent
+Let's have a look at the naive implementation of std::pair
+
+\begin{Code}
+    template <typename T1, typename T2>
+    struct Pair
+    {
+        Pair(const T1& t1, const T2& t2): m_first(t1), m_second(t2)
+        {
+        }
+        
+        T1 m_first;
+        T2 m_second;
+    };
+    
+    int main()
+    {
+        /* Won't compile */
+        // Pair p {"str1", "str2"};
+    
+        return 0;
+    }
+\end{Code}
+
+    The program above reveals the nature of \texttt{auto} - \textbf{it decays if only it is working on \texttt{values} but not \texttt{references}}. Because
+of that, the code presented before is internally working like that
+\begin{Code}
+    /* Passing parameters phase */
+    const char arg1[5] {"str1"};
+    const char arg2[5] {"str2"};
+
+    /* Initialization - can't be done that way so we got error */
+    char[5] m_first { arg1 }; 
+    char[5] m_second { arg2 };
+\end{Code}
+\noindent
+There won't be an error if we pass by the value which decays.\newline
+
+    On the other hand, notice that \texttt{std::pair} is somehow working with references. It is possible because of
+\textbf{deduction guides}.
+
+\begin{Code}
+template <typename T1, typename T2>
+struct Pair
+{
+    Pair(const T1& t1, const T2& t2): m_first(t1), m_second(t2)
+    {
+    }
+    
+    T1 m_first;
+    T2 m_second;
+};
+
+/* Deduction guide */
+template <typename T1, typename T2>
+/* No references, so argument will decay */
+Pair(T1, T2) -> Pair<T1, T2>;
+
+int main()
+{
+    Pair p {"str1", "str2"};
+
+    return 0;
+}
+\end{Code}
+
+    Deduction guides compete with the constructors of a class. Class template argument deduction uses the constructor guide that
+has the highest priority according to overload resolution. \textbf{If a constructor and a deduction guide match equally well,
+the deduction guide is preferred}. Otherwise, for instance, when no conversion is needed, the constructor is taken.
+\begin{Code}
+    #include <string>
+    
+    template <typename T>
+    struct Struct
+    {
+        T value;
+    };
+    
+    Struct(const char*) -> Struct<std::string>;
+    
+    int main()
+    {
+        /* It is std::string inside now */
+        Struct { "value" }; 
+    
+        return 0;
+    }
+\end{Code}
+
+\section{Fold expressions}
+    From now on we have two basic ways of using \textbf{fold expressions}. As they are counter-intuitive, they must be memorized
+\begin{enumerate}
+    \item \textbf{left fold}: \texttt{... \textbf{op} args} which is
+    \begin{equation*}
+        (\;(\;(\;arg1\; \textbf{op}\; arg2\;)\; \textbf{op}\; arg3\; )\; op\; ...\;)
+    \end{equation*}
+    \item \textbf{right fold}: \texttt{args \textbf{op} ...} which is
+    \begin{equation*}
+        (\;arg1\; \textbf{op}\; (\;arg2\; \textbf{op}\; (\;arg3\; \textbf{op}\; (\;...\;)\;)\;)\;)
+    \end{equation*}
+\end{enumerate}
+\noindent
+The following program can make it clear
+\begin{Code}
+    #include <iostream>
+
+    template <typename... Args>
+    auto left_sum (const Args&... args)
+    {
+        return (... + args); // ( ( ( arg1 + arg2 ) + arg3 ) + ... )
+    }
+    
+    template <typename... Args>
+    auto right_sum (const Args&... args)
+    {
+        return (args + ...); // ( arg1 + ( arg2 + ( arg3 + (...) ) )
+    }
+    
+    int main()
+    {
+        /* Prints "0" */
+        std::cout << left_sum(1, 2.0, -3) << std::endl;
+        
+        /* Prints "0" */
+        std::cout << right_sum(1, 2.0, -3) << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    Sometimes left or right fold matters. Assume we've invoked \texttt{left\_sum} function like
+\begin{Code}
+    left_sum("str1", "str2", std::string {"str3"});
+\end{Code}
+the code won't compile - the expression is unfolded to
+\begin{center}
+    \texttt{((const char* + const char*) + std::string)}
+\end{center}
+which doesn't work since \texttt{const char* + const char*} is not defined. On the other hand
+\begin{Code}
+    right_sum("str1", "str2", std::string {"str3"});
+\end{Code}
+compiles, because the expression unfolded is
+\begin{center}
+    \texttt{const char* + (const char* + std::string)}
+\end{center}
+and this equals
+\begin{center}
+    \texttt{(const char* + std::string)} = \texttt{std::string}.
+\end{center}
+
+We should remember that comma operator \textbf{not always must be used!}.
+Let's have a look at this example
+\begin{Code}
+    template <std::size_t N>
+    using thread_pool = std::array<std::thread, N>;
+    
+    template <typename... Functions>
+    auto create_threads(Functions&&... functions)
+    {
+        return thread_pool<sizeof...(Functions)>
+        {
+            std::thread{ std::forward<Functions>(functions) }...
+        };
+    }
+\end{Code}
+\noindent
+If we used
+\begin{Code}
+    return thread_pool<sizeof...(Functions)>
+    {
+        /* Comma operator used */
+        std::thread{ std::forward<Functions>(functions) }, ...
+    }; 
+\end{Code}
+we would get only \textbf{only last thread}. This is because of the comma
+operator behavior - as we already know, the comma operator
+\texttt{((expr1, expr2, ...))} evaluates all its operands
+in left-to-right order and returns the result of the last operand.
+In this case, we're constructing \texttt{std::thread} objects,
+but we're not actually returning them or storing them in the array properly.
+The result of this expression is just the last \texttt{std::thread} object,
+not a sequence of threads.
+
+\subsection{Deal with empty parameters pack}
+    Neither \texttt{left\_sum} or \texttt{right\_sum} work with empty parameters pack. That can be fixed with some trick
+\begin{Code}
+    template <typename... Args>
+    auto left_sum (const Args&... args)
+    {
+        /*  ( ( ( arg1 + arg2 ) + arg3 ) + ... + 0 ) */
+        return (0 + ... + args);
+    }
+    
+    template <typename... Args>
+    auto right_sum (const Args&... args)
+    {
+        /* ( 0 + ( arg1 + ( arg2 + ( arg3 + (...) ) ) ) ) */
+        return (args + ... 0);
+    }
+\end{Code}
+\noindent
+We've added explicit value which will be returned if an empty parameter pack is passed.\newline
+
+    Both compile-time \texttt{if} and fold expressions shall be used with \texttt{type\_traits} to reduce the amount of the code.
+
+\section{Miscellaneous}
+    C++17 provided some more elements than discussed above, but they are ,,one-liners'' which can be easily found in the preference. They are here just to point out their existence
+\begin{enumerate}
+    \item New attributes like \texttt{[[fallthrough]]}, \texttt{[[nodiscard]]} etc.
+    \item Defined expression evaluation order.
+    \item Nested namespaces.
+    \item New classes \texttt{std::optional}, \texttt{std::variant}, \texttt{std::any}, \texttt{std::byte},\newline
+    \texttt{std::string\_view}, etc.
+    \item New algorithms \texttt{std::size()}, \texttt{std::empty()}, \texttt{std::clamp()}, etc.
+    \item \texttt{std::vector}, \texttt{std::list}, \texttt{std::forward\_list} support incomplete types.
+\end{enumerate}
+\end{document}

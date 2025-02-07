@@ -1,0 +1,2123 @@
+\documentclass[../main]{subfiles}
+
+\begin{document}
+\chapter{Move semantics}
+\section{Basics}
+\subsection{\textit{RVO}}
+    \textbf{\textit{RVO}} - \textbf{\textit{Return Value Optimization}} is a compiler technique to avoid copying an object that a function returns as its value, including
+avoiding the creation of a temporary object. This optimization permits a function to efficiently return large objects while also simplifying the function’s
+interface and eliminating scope for issues such as resource leaks.
+\begin{Code}
+    #include <iostream>
+    
+    struct Data
+    {
+        Data()
+        {
+            std::cout << "Default constructor" << std::endl;
+        }
+        
+        Data(const Data&)
+        {
+            std::cout << "const Data& constructor" << std::endl;
+        }
+        
+        Data(Data&&)
+        {
+            std::cout <<"Data&& constructor" << std::endl;
+        }
+        
+        Data& operator=(const Data&)
+        {
+            std::cout << "const Data& operator" << std::endl;
+            return *this;
+        }
+        
+        Data& operator=(Data&&)
+        {
+            std::cout << "Data& operator" << std::endl;
+            return *this;
+        }
+
+        int value { 0 };
+    };
+    
+    Data get()
+    {
+        /* Unnamed object returned */
+        return Data {};
+    }
+    
+    int main()
+    {
+        /* Prints "Default constructor" */
+        Data data = get();
+        return 0;
+    }
+\end{Code}
+\noindent
+In the example above, neither copy constructor (copy operator) nor move constructor (move operator) is called when \texttt{get()} returns its value. It would work
+even if all constructors (except the default one) and all assign operators were deleted. The temporary object is ,,stolen'' by \texttt{data} variable without
+doing a copy.\newline
+
+    We may apply \textit{RVO} if the object returned from a function is a \textbf{prvalue} expression. This expression must have the same type as the type of the function's return value by signature,
+without \texttt{cv}-qualifiers. Besides, with C++17, \textit{RVO} is no longer an optimization, but a rule that compilers must follow. This rule is applied even if a move/copy constructor has side
+effects.
+
+\subsection{\textit{NRVO}}
+    \textbf{\textit{NRVO}} - \textbf{\textit{Named Return Value Optimization}} which is \textit{RVO} where the temporary object to be returned has its name.
+\begin{Code}
+    #include <iostream>
+    
+    struct Data
+    {
+        Data()
+        {
+            std::cout << "Default constructor" << std::endl;
+        }
+        
+        Data(const Data&)
+        {
+            std::cout << "const Data& constructor" << std::endl;
+        }
+        
+        Data(Data&&)
+        {
+            std::cout <<"Data&& constructor" << std::endl;
+        }
+        
+        Data& operator=(const Data&)
+        {
+            std::cout << "const Data& operator" << std::endl;
+            return *this;
+        }
+        
+        Data& operator=(Data&&)
+        {
+            std::cout << "Data& operator" << std::endl;
+            return *this;
+        }
+        
+        int value { 0 };
+    };
+    
+    Data get()
+    {
+        /* Named object returned */
+        Data data;
+        data.value = 1;
+        return data;
+    }
+    
+    int main()
+    {
+        /* Prints "Default constructor" */
+        Data data = get();
+        return 0;
+    }
+\end{Code}
+\noindent
+Effectively, \textit{NRVO} transforms the code by using \texttt{new} and \texttt{delete} operators which may look like this
+\begin{Code}
+    Data* get()
+    {
+        Data* data = new Data {};
+        data->value = 1;
+        return data;
+    }
+    
+    int main()
+    {
+        Data* data = get();
+        delete data;
+        return 0;
+    }
+\end{Code}
+\noindent
+Remember that we can apply \textit{NRVO} only when the type of the returned object and the type of the object returned according to the function signature
+coincide completely!\newline
+
+    A common mistake disabling \textit{NRVO} is to use \texttt{std::move()} - it is \textit{anti-pattern} and has to be avoided being \textbf{pessimization}
+(opposite to \textbf{optimization})
+\begin{Code}
+    Data get()
+    {
+        Data data;
+        data.value = 1;
+        
+        /* It disables NRVO! */
+        return std::move(data);
+    }
+\end{Code}
+\noindent
+Here we tell the compiler that the returned object must be cast to the rvalue object, so it will use the move constructor or the move assign operator which can even be deleted for \textit{NRVO}.
+Moreover, the returned type is \texttt{Data\&\&} now instead of \texttt{Data} so \textit{NRVO} cannot be applied.
+
+\subsection{\textit{SSO}}
+    \textbf{\textit{SSO}} - \textbf{\textit{Small String Optimization}} is an optimization that the code uses an internal \texttt{char} buffer to store contents
+of small strings (i.e. their size is smaller than some value) to eliminate dynamic allocation of the memory.
+
+\subsection{Move semantics rules}
+    We can follow a few simple rules, to have a clean way of using move semantics
+\begin{itemize}
+    \item \textbf{Avoid objects with names}
+    \begin{Code}
+        /* BAD */
+        std::string str { "string" };
+        print(str);
+        // str is not used later
+
+
+        /* GOOD */
+        print(std::string { "string" };
+    \end{Code}
+    \item \textbf{Use \texttt{std::move()} for objects with names}
+    \begin{Code}
+        std::string str { "string" };
+        print(std::move(str));
+    \end{Code}
+    \item \textbf{Use \texttt{std::move()} to initialize members of a class when possible}. Before move semantics the code would look like that one
+    \begin{Code}
+        #include <iostream>
+        #include <string>
+        #include <vector>
+        
+        struct Data
+        {
+            Data(const std::string& str, const std::vector<int>& vec):
+                m_str ( str ),
+                m_vec ( vec )
+            {
+            }
+        
+            std::string m_str;
+            std::vector<int> m_vec;
+        };
+        
+        int main()
+        {
+            /* "string" is const char* object, so will be copied to str,
+             * which is be copied to m_str;
+             * {1, 2, 3} is an initializer list which creates
+             * a new vector vec, which is be copied to m_vec;
+             */
+            Data data { "string", {1, 2, 3} };
+        
+            return 0;
+        }
+    \end{Code}
+    \noindent
+    Having that possibility, we can move the arguments to be members
+    \begin{Code}
+        #include <iostream>
+        #include <string>
+        #include <vector>
+        
+        struct Data
+        {
+            Data(std::string str, std::vector<int> vec):
+                m_str ( std::move(str) ),
+                m_vec ( std::move(vec) )
+            {
+            }
+        
+            std::string m_str;
+            std::vector<int> m_vec;
+        };
+        
+        int main()
+        {
+            /* "string" is const char* object, so will be copied to str,
+             * and then moved m_str;
+             * {1, 2, 3} is an initializer list which creates
+             * a new vector vec but moved to m_vec;
+             */
+            Data data { "string", {1, 2, 3} };
+        
+            return 0;
+        }
+    \end{Code}
+    \noindent
+    To summarize it - if there is no important reason, \textbf{we shouldn't use the constructor with simple \texttt{const \&} parameter type}.
+    One of the special cases may be \texttt{std::array} which hasn't cheap move semantics implemented or if we already have a value and we
+    want just to modify it within a class.
+    \item \textbf{Avoid unnecessary \texttt{std::move()}}
+    \begin{itemize}
+        \item \textbf{Never return local objects with \texttt{std::move()}}
+        \begin{Code}
+            /* BAD */
+            std::string get()
+            {
+                std::string str { "string" };
+                /* ... some actions on str ... */
+                return std::move(str);
+            }
+
+            /* GOOD */
+            std::string get()
+            {
+                std::string str { "string" };
+                /* ... some actions on str ... */
+                return str; // NRVO active!
+            }
+        \end{Code}
+        \item \textbf{Never use \texttt{std::move()} if we already have a temporary object}
+        \begin{Code}
+            /* BAD */
+            std::string str { std::move(get()) };
+
+            /* GOOD */
+            std::string str { get() };
+        \end{Code}
+    \end{itemize}
+\end{itemize}
+
+\subsection{Noexcept and move semantics}
+    The C++ standard introduced a rule called \textbf{the strong exception handling guarantee}.
+Let's say we want to add something to the vector
+by calling \texttt{push\_back()} function and then an exception arises.
+\textbf{ If we used just moving semantics, there is no option to 
+\textit{rollback}} - by moving we destroyed the original object,
+so it cannot be restored; but if we used copying, we just remove
+the last object which caused the exception, and we can
+continue the program execution.
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    struct Info
+    {
+    public:
+        Info(const char* msg): m_msg ( msg )
+        {
+            std::cout << "Default constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        Info(const Info& info): m_msg ( info.m_msg )
+        {
+            std::cout << "const Info& constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        Info(Info&& info): m_msg ( std::move(info.m_msg) )
+        {
+            std::cout << "Info&& constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        std::string get_msg() const
+        {
+            return m_msg;
+        }
+    
+    private:
+        std::string m_msg;
+    };
+    
+    int main()
+    {
+        std::vector<Info> infos
+        {
+            "Everything ok",
+            "Exception thrown!",
+            "Operation aborted"
+        };
+        
+        /* Prints 3 */
+        std::cout << "Capacity: " << infos.capacity() << std::endl;
+    
+        /* Printouts:
+         * "Info&& constructor for: Additional info!"
+         * "const Info& constructor for: Everything ok"
+         * "const Info& constructor for: Exception thrown!"
+         * "const Info& constructor for: Operation aborted"
+         */
+        infos.push_back("Additional info!");
+        
+        /* Prints "6" */
+        std::cout << "Capacity: " << infos.capacity() << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+As expected, only the copy constructor has been used.
+We can do something with it - \textbf{we can
+\textit{give the guarantee} for the compiler that the moving
+constructor doesn't throw.}
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    struct Info
+    {
+    public:
+        Info(const char* msg): m_msg ( msg )
+        {
+            std::cout << "Default constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        Info(const Info& info): m_msg ( info.m_msg )
+        {
+            std::cout << "const Info& constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        Info(Info&& info) noexcept:
+            m_msg ( std::move(info.m_msg) )
+        {
+            std::cout << "Info&& constructor for: "
+                      << m_msg << std::endl;
+        }
+    
+        std::string get_msg() const
+        {
+            return m_msg;
+        }
+    
+    private:
+        std::string m_msg;
+    };
+    
+    int main()
+    {
+        std::vector<Info> infos
+        {
+            "Everything ok",
+            "Exception thrown!",
+            "Operation aborted"
+        };
+        
+        /* Prints 3 */
+        std::cout << "Capacity: " << infos.capacity() << std::endl;
+    
+        /* Printouts:
+         * "Info&& constructor for: Additional info!"
+         * "Info&& constructor for: Everything ok"
+         * "Info&& constructor for: Exception thrown!"
+         * "Info&& constructor for: Operation aborted"
+         */
+        infos.push_back("Additional info!");
+        
+        /* Prints "6" */
+        std::cout << "CAPACITY: " << infos.capacity() << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    The code above works well, but the question arises - is it okay to mark move constructor with \texttt{noexcept} keyword?
+If we throw it there, despite the guarantee of no exceptions, the program will call \texttt{std::terminate()} immediately,
+so it would be better to create a \textbf{conditional \texttt{noexcept} declaration}
+\begin{Code}
+    Info(Info&& info) noexcept(
+        std::is_nothrow_move_constructible_v<std::string>
+        && noexcept(std::cout << m_msg)):
+        m_msg ( std::move(info.m_msg) )
+    {
+        std::cout << "Info&& constructor for: "
+                  << m_msg << std::endl;
+    }
+\end{Code}
+\noindent
+If we add it, the compiler will get back to copying instead of moving, since \texttt{std::cout} can throw. But there is a positive aspect. If we just type
+\begin{Code}
+    Info (Info&&) = default;
+\end{Code}
+\noindent
+the compiler will detect \texttt{noexcept} guarantees by itself, and then \textbf{no copying will be enabled}. Therefore, if we implement
+a move constructor explicitly, \textbf{we should declare whether and when it throws}; otherwise \textbf{we shouldn't specify anything at all}.
+
+\subsection{Moved-from objects}
+    Let's start with the fact that \textbf{\texttt{std::move()} doesn't move anything}. It semantically means \textit{I no longer need this value here}.
+The \texttt{std::move()} only marks the object to be movable but doesn't move anything. It allows the implementation of the call to benefit from this mark by
+performing some optimizations. \textbf{Whether the value is moved is something the caller doesn't know} and because of that, after \texttt{std::move()} we
+should treat the object as valid but in an unspecified state
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    
+    int main()
+    {
+        std::string str1 {"Move only"};
+        
+        /* Still prints "Move only" probably */
+        std::move(str1);
+        std::cout << str1 << std::endl;
+        
+        
+        std::string str2 {"Move and assign"};
+        auto from_string = std::move(str2);
+        
+        /* Prints nothing probably */
+        std::cout << str2 << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+In both scenarios above, it is guaranteed that \texttt{str} is still a valid \texttt{std::string} object on which we can perform any action of string,
+unfortunately, we don't know the initial value - the standard says nothing if the string keeps old value or was cleared. The only guarantee we have is
+that the \textbf{moved-from} object is not (even partially) destroyed for which at least the destructor will be called.\newline
+
+    \textbf{The reason for keeping moved-from objects undestroyed is
+their reusable benefits, for instance quite cheap implementation of
+\texttt{swap}}
+\begin{Code}
+    #include <iostream>
+    #include <chrono>
+    #include <vector>
+    
+    /* Helpers */
+    struct Timer
+    {
+        Timer() : m_begin(std::chrono::high_resolution_clock::now())
+        {
+        }
+    
+        ~Timer()
+        {
+            using namespace std::chrono;
+            using ms = std::chrono::milliseconds;
+            
+            auto end = high_resolution_clock::now();
+            auto value = duration_cast<ms>(end - m_begin);
+            std::cout << "Time: " << value.count() << " ms" << std::endl;
+        }
+    
+        std::chrono::time_point<std::chrono::high_resolution_clock> m_begin;
+    };
+    
+    void fill(std::vector<int>& a, std::vector<int>& b)
+    {
+        std::size_t max = 10000000;
+        for (std::size_t i = 0; i < max; i++)
+        {
+            a.push_back(i);
+            b.push_back(max-i);
+        }
+    }
+    
+    /* Main functions */
+    template <typename T>
+    void lswap(T& a, T& b)
+    {
+        Timer timer {};
+    
+        T tmp { a };
+        a = b;
+        b = tmp;
+    }
+    
+    template <typename T>
+    void rswap(T& a, T& b)
+    {
+        Timer timer {};
+    
+        T tmp { std::move(a) };
+        a = std::move(b);
+        b = std::move(tmp);
+    }
+    
+    int main()
+    {
+        std::vector<int> a;
+        std::vector<int> b;
+        fill(a, b);
+    
+        lswap(a, b);
+        
+        /* Usually much faster than lswap */
+        rswap(a, b);
+    
+        return 0;
+    }
+\end{Code}
+
+    It is worth to mention a special case of a moved-from object
+when we move the object to itself
+\begin{Code}
+    auto value = std::move(value);
+\end{Code}
+\noindent
+As was said, we know that the \texttt{value} is still valid, but in this case, we can't say anything about its state.\newline
+
+    To recap, a moved-from object has to fulfill a few conditions
+\begin{enumerate}
+    \item it needs to be destructible,
+    \item it needs to support the assignment of a new value to it,
+    \item it needs to be copyable, movable, and assignable to other objects.
+\end{enumerate}
+\noindent
+    Especially the first condition is important. For instance \texttt{std::future} is equipped with a special function \texttt{valid()} that returns \texttt{false}
+if the object is moved-from object. Now let's have a look at a badly-designed object
+\begin{Code}
+    #include <array>
+    #include <exception>
+    #include <chrono>
+    #include <iostream>
+    #include <thread>
+    
+    class Tasks
+    {
+    public:
+        Tasks() = default;
+    
+        /* Copying disabled */
+        Tasks(Tasks&&) = default;
+        Tasks& operator=(Tasks&&) = default;
+    
+        template <typename T>
+        void start(T operation)
+        {
+            m_threads[m_numThreads] = std::thread { std::move(operation) };
+            ++m_numThreads;
+        }
+    
+        ~Tasks()
+        {
+            for (int i = 0; i < m_numThreads; i++)
+            {
+                m_threads[i].join();
+            }
+        }
+    
+    private:
+        std::array<std::thread, 10> m_threads;
+        int m_numThreads { 0 };
+    };
+    
+    int main()
+    {
+        try
+        {
+            Tasks tasks;
+            tasks.start([]
+            {
+                std::this_thread::sleep_for(std::chrono::seconds { 2 });
+                std::cout << "Action1 done" << std::endl;
+            });
+    
+            tasks.start([]
+            {
+                std::cout << "Action2 done" << std::endl;
+            });
+
+            /* PROBLEM IS HERE!!! */
+            Tasks other { std::move(tasks) };
+        }
+        catch (const std::exception& e)
+        {
+            std::cout << "EXCEPTION CAUGHT: " << e.what() << std::endl;
+        }
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+The code part
+\begin{Code}
+    Tasks other { std::move(tasks) };
+\end{Code}
+moves the container with threads, so the \texttt{Tasks} object doesn't contain them anymore. But when the object is about to end its life,
+destructor is trying to perform joining threads, which fails as there are no threads to be joined.\newline
+
+    We have two ways to fix it keeping the move semantics
+\begin{enumerate}
+    \item We can check if threads can be joined by calling \texttt{joinable()} function in the destructor.
+    \item We can replace the default implementation of the move constructor and the move operator with a customized one.
+\end{enumerate}
+
+\subsection{Copying as fallback}
+    When a function provides special implementation taking non-\texttt{const} rvalue reference, a compiler can optimize the copying of a value by ,,stealing'' the value from the source.
+However, if there is no optimized version of a function for the move semantics, then the usual copying is used as a fallback
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    struct Data
+    {
+        Data() {}
+    
+        void insert(const std::string& str)
+        {
+            m_data.push_back(str);
+        }
+    
+        std::vector<std::string> m_data;
+    };
+    
+    int main()
+    {
+        Data data;
+        std::string str { "string" };
+        
+        /* It uses copy semantics */
+        data.insert(std::move(str));
+
+        /* str value hasn't changed probably */
+        std::cout << str << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    For the generic code, it is important that we can always mark an object with \texttt{std::move()} if we no longer need its value.
+The corresponding code compiles even if there is no move semantics support. For the same reason, we can even mark objects of fundamental data type such as
+\texttt{int} or raw pointer with \texttt{std::move()}.\newline
+
+    One more important thing is that objects declared with \texttt{const} cannot be moved because any optimizing implementation requires that the passed argument
+can be modified.
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    struct Data
+    {
+        Data() = default;
+    
+        void insert(const std::string& str)
+        {
+            std::cout << "const std::string&" << std::endl;
+            m_data.push_back(str);
+        }
+    
+        void insert(std::string&& str)
+        {
+            std::cout << "std::string&&" << std::endl;
+            /* std::move() needed - str is lvalue here! */
+            m_data.push_back(std::move(str));
+        }
+    
+        std::vector<std::string> m_data;
+    };
+    
+    int main()
+    {
+        Data data;
+        std::string str { "string" };
+        const std::string cstr { "cstring" };
+
+        /* Prints "std::string&&" */
+        data.insert(std::move(str));
+
+        /* Prints "const std::string&" */
+        data.insert(std::move(cstr));
+
+        /* Empty probably */
+        std::cout << str << std::endl;
+
+        /* Keeps its value so prints "cstring" */
+        std::cout << cstr << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    Notice that an object marked with \texttt{std::move()} can still be passed to a function that takes an ordinary lvalue reference
+and keeps its value. It will not work with non-\texttt{const} lvalue reference and the code won't compile.
+
+\subsection{Function overloading - short summarization}
+\begin{enumerate}
+    \item \textbf{\texttt{function(T value)}} can handle \textbf{any of type \texttt{T} but it will copy unless we use move semantics explicitly}
+    \item \textbf{\texttt{function(T\& value)}} can handle \textbf{modifiable named objects} only.
+    \item \textbf{\texttt{function(const T\& value)}} can handle
+    \begin{itemize}
+        \item \textbf{modifiable named objects},
+        \item \textbf{\texttt{const} named objects},
+        \item \textbf{temporary objects that don't have a name},
+        \item \textbf{object marked by \texttt{std::move()}}.
+    \end{itemize}
+    \item \textbf{\texttt{function(T\&\& value)}} can handle
+    \begin{itemize}
+        \item \textbf{temporary objects that don't have a name},
+        \item \textbf{non-\texttt{const} objects market with \texttt{std::move()}}.
+    \end{itemize}
+    \item \textbf{\texttt{function(const T\&\& value)}} can handle
+    \begin{itemize}
+        \item \textbf{temporary objects that don't have a name},
+        \item \textbf{\texttt{const} or non-\texttt{const} objects market with \texttt{std::move()}}.
+    \end{itemize}
+    However, there is no useful semantic meaning in this case - from its definition, an rvalue reference steals the value,
+    but being \texttt{const} at the same time, it can't do it. Nonetheless, it will work with \texttt{const} objects
+    \begin{Code}
+        #include <iostream>
+        #include <string>
+        
+        void print(const std::string& str)
+        {
+            std::cout << "const std::string&:" << str << std::endl;
+        }
+        
+        void print(const std::string&& str)
+        {
+            std::cout << "const std::string&&:" << str << std::endl;
+        }
+        
+        int main()
+        {
+            const std::string str { "string" };
+            
+            /* Prints "const std::string&:string" */
+            print(str);
+            
+            /* Prints "const std::string&&:string" */
+            print(std::move(str));
+        
+            return 0;
+        }
+    \end{Code}
+    This behavior is usually covered by \texttt{const} reference, but there exist a small number of examples that employ it, like \texttt{std::optional}.
+\end{enumerate}
+
+\section{Classes}
+    Move semantics in classes can be disabled by mistake.
+\textbf{If any of the following special member functions are declared by the user (\textit{explicitly declared}, even with \texttt{default}
+keyword), class objects would be not movable}
+\begin{itemize}
+    \item Copy constructor.
+    \item Copy assignment operator.
+    \item Another move operation.
+    \item Destructor.
+\end{itemize}
+
+    Assuming that, the following declaration
+\begin{Code}
+    struct Data
+    {
+    	~Data() = default;
+    };
+\end{Code}
+\textbf{will disable move semantics}.
+As a consequence, \textbf{a polymorphic base class has move 
+semantics disabled}
+\begin{Code}
+    struct BaseClass
+    {
+        virtual ~BaseClass() {}
+    };
+\end{Code}
+\noindent
+The code is working anyway, because of copying as fallback. Anyway,
+due to the fact mentioned a moment ago remember to \textbf{not implement your own destructor unless it is necessary!}
+
+\subsection{How to implement moving semantics in a class}
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    struct Data
+    {
+        Data():
+            m_str (),
+            m_vec ()
+        {
+            std::cout << "Default constructor" << std::endl;
+        }
+    
+        Data(const Data& data):
+            m_str ( data.m_str ),
+            m_vec ( data.m_vec )
+        {
+            std::cout << "const Data& constructor" << std::endl;
+        }
+    
+        Data& operator=(const Data& data)
+        {
+            if (this == &data)
+            {
+                return *this;
+            }
+    
+            m_str = data.m_str;
+            m_vec = data.m_vec;
+            std::cout << "const Data& operator" << std::endl;
+            return *this;
+        }
+    
+        Data(Data&& data):
+            m_str ( std::move(data.m_str) ),
+            m_vec ( std::move(data.m_vec) )
+        {
+            std::cout << "Data&& constructor" << std::endl;
+        }
+    
+        Data& operator=(Data&& data)
+        {
+            if (this == &data)
+            {
+                return *this;
+            }
+    
+            m_str = std::move(data.m_str);
+            m_vec = std::move(data.m_vec);
+            std::cout << "Data&& operator" << std::endl;
+            return *this;
+        }
+    
+        std::string m_str;
+        std::vector<int> m_vec;
+    };
+    
+    int main()
+    {
+        /* Prints "Default constructor" */
+        Data data0;
+        
+        /* Prints "const Data& constructor" */
+        Data data1 { data0 };
+        
+        /* Prints "const Data& operator" */
+        data0 = data1;
+    
+        /* Prints "Data&& constructor" */
+        Data data2 { std::move(data0) };
+        
+        /* Prints "Data&& operator" */
+        data2 = std::move(data1);
+    
+        return 0;
+    }
+\end{Code}
+
+    Keep in mind that move semantics is not passed through. When we initialize the members in the move constructor, we have to mark them
+with \texttt{std::move()}; otherwise, we would just copy them. Analogous comments apply to the move assignment operator.
+
+\subsection{Reference qualifiers}
+\label{Reference qualifiers}
+    Before we start, let's have a short look at range-\texttt{for} loop implementation in the pseudocode
+\begin{Code}
+    for (range_declaration : range_expression)
+    {
+      auto&& __range = range_expression;
+      begin_expr = std::begin(__range);
+      end_expr = std::end(__range);
+      for (auto __begin = begin_expr,
+                __end = end_expr;
+                __begin != __end; ++__begin) {
+        range_declaration = *__begin;
+        loop_statement
+      }
+    }
+\end{Code}
+\noindent
+We will discuss the \texttt{auto\&\&} statement later, for now, it is enough to observe, that \texttt{range\_expression} initializes \texttt{\_\_range} variable.
+If it is a pure value, we copy it but if it is a reference, we initialize \texttt{\_\_range} object with the given type of reference
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+
+    struct Data
+    {
+        Data():
+            m_str ( "abcdefghijklmnoprstuwvz" )
+        {
+        }
+    
+        std::string value_get() const
+        {
+            return m_str;
+        }
+    
+        const std::string& cref_get() const
+        {
+            return m_str;
+        }
+    
+        std::string m_str;
+    };
+    
+    Data make_data()
+    {
+        return Data {};
+    }
+    
+    int main()
+    {
+        /* value_get() returns a value so we have a copy inside
+         * of a for loop. Then, Data dies but copy persists.
+         */
+        /* Prints "abcdefghijklmnoprstuwvz" */
+        for (char c : make_data().value_get())
+        {
+            std::cout << c;
+        }
+        std::cout << std::endl;
+    
+        /* cref_get() returns the reference, so we have a reference
+         * inside of a for loop. Then, Data dies thus everything
+         * can happen.
+        */
+        /* Prints whatever it needs */
+        for (char c : make_data().cref_get())
+        {
+            std::cout << c;
+        }
+        std::cout << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+    To solve the problem, it would be nice to have a function that automatically detects if it works on a temporary object. That is the reason
+why C++ standard provided \textbf{reference qualifiers}.\newline
+
+    The code above can be corrected by implementing \texttt{get\_cref()} function as \texttt{get\_rref() \&\&}
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+
+    struct Data
+    {
+        Data():
+            m_str ( "abcdefghijklmnoprstuwvz" )
+        {
+        }
+    
+        std::string value_get() const
+        {
+            return m_str;
+        }
+
+        /* Object is no longer needed! */
+        std::string rref_get() &&
+        {
+            return m_str;
+        }
+    
+        std::string m_str;
+    };
+    
+    Data make_data()
+    {
+        return Data {};
+    }
+    
+    int main()
+    {
+        /* Prints "abcdefghijklmnoprstuwvz" */
+        for (char c : make_data().value_get())
+        {
+            std::cout << c;
+        }
+        std::cout << std::endl;
+    
+        /* Prints "abcdefghijklmnoprstuwvz" */
+        for (char c : make_data().rref_get())
+        {
+            std::cout << c;
+        }
+        std::cout << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    We can add two special qualifiers to each member function of class
+\begin{itemize}
+    \item \textbf{\texttt{\&}} for lvalue objects.
+    \item \textbf{\texttt{\&\&}} for rvalue objects when the object (member) is no longer needed.
+\end{itemize}
+\noindent
+The qualifiers after the parameters list in parenthesis allow us to qualify one more object that is not passed
+as a parameter - the object we call the method. From now on we can have functions dedicated to temporary objects
+and other ones.
+
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    struct Data
+    {
+        Data() {};
+    
+        void get() &
+        {
+            std::cout << "get() &" << std::endl;
+        }
+    
+        void get() &&
+        {
+            std::cout << "get() &&" << std::endl;
+        }
+    
+        void get() const &
+        {
+            std::cout << "get() const&" << std::endl;
+        }
+    
+        void get() const &&
+        {
+            std::cout << "get() const&&" << std::endl;
+        }
+    };
+    
+    int main()
+    {
+        Data data;
+        
+        /* Prints "get() &" */
+        data.get();
+        
+        /* Prints "get() &&" */
+        std::move(data).get();
+        
+        /* Prints "get() &&" */
+        Data{}.get();
+    
+    
+        const Data cdata;
+        
+        /* Prints "get() const&" */
+        cdata.get();
+
+        /* Prints "get() const&&" */
+        std::move(cdata).get();
+    
+        return 0;
+    }
+\end{Code}
+
+    Usually, we have only two or three of these overloads (\texttt{\&\&} and \texttt{const \&} for getters). Note that
+\textbf{overloading for both reference and non-reference qualifiers is not allowed, so a compilation of the following code}
+\begin{Code}
+    struct Data
+    {
+        Data() = default;
+        
+        void get() && {}
+        void get() const {}
+    };
+\end{Code}
+gets the error \textit{error: ‘void Data::get() const’ cannot be overloaded with ‘void Data::get() \&\&’}.
+
+\subsubsection{When to use qualifiers}
+    Generally, rvalue reference qualifiers should be used in any place where an object is modified - there is no need to perform some actions
+on the object which are about to die.
+\textbf{As standard suggests it could be better to declare the
+assignment operator with reference qualifiers wherever we can.}
+\begin{Code}
+    struct Data
+    {
+        Data () = default;
+        Data& operator=(const Data&) = default;
+    };
+    
+    Data Get()
+    {
+        return Data {};
+    }
+    
+    int main()
+    {
+        /* It works but makes no sense */
+        Get() = Data {};
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+To avoid such bizarre activities, we can add a reference qualifier
+
+\begin{Code}
+struct Data
+{
+    Data () = default;
+    
+    /* The qualifier & added */
+    Data& operator=(const Data&) & = default;
+};
+
+Data Get()
+{
+    return Data {};
+}
+
+int main()
+{
+    /* error: passing ‘Data’ as ‘this’ argument
+     * discards qualifiers [-fpermissive]
+     */
+    // Get() = Data {};
+
+    return 0;
+}
+\end{Code}
+
+\section{Perfect forwarding}
+    Let's start with looking at the motivating example where we don't use the perfect forwarding
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    
+    namespace detail
+    {
+        void print(const std::string&)
+        {
+            std::cout << "const std::string&" << std::endl;
+        }
+        
+        void print(const std::string&&)
+        {
+            std::cout << "const std::string&&" << std::endl;
+        }
+        
+        void print(std::string&)
+        {
+            std::cout << "std::string&" << std::endl;
+        }
+        
+        void print(std::string&&)
+        {
+            std::cout << "std::string&&" << std::endl;
+        }
+    }  // namespace detail
+    
+    void print(const std::string& str)
+    {
+        detail::print(str);
+    }
+    
+    void print(const std::string&& str)
+    {
+        detail::print(str);
+    }
+    
+    void print(std::string& str)
+    {
+        detail::print(str);
+    }
+    
+    void print(std::string&& str)
+    {
+        detail::print(str);
+    }
+    
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        
+        /* Prints "const std::string&" */
+        print(cstr);
+
+        /* Prints "const std::string&" - parameter not forwarded! */
+        print(std::move(cstr));
+    
+        std::string str { "string" };
+
+        /* Prints "const std::string&" */
+        print(str);
+
+        /* Prints "const std::string&" - parameter not forwarded */
+        print(std::move(str));
+    
+        return 0;
+    }
+\end{Code}
+
+    As we see, the function \texttt{print(std::move(cstr))} doesn't
+call the function\newline
+\texttt{detail::print(const std::string\&\&)} which is similar
+to the case of\linebreak
+\texttt{print(std::move(str))} that doesn't invoke \texttt{detail::print(std::string\&\&)}. A quick fix would be
+\begin{Code}
+    void print(const std::string&& str)
+    {
+        detail::print(std::move(str));
+    }
+    
+    void print(std::string&& str)
+    {
+        detail::print(std::move(str));
+    }
+\end{Code}
+but what if we had three arguments instead of one? In such a case, we would implement 81 overloads, definitely too much. That's why C++ has
+a special formula called \textbf{perfect forwarding}.\newline
+
+    Perfect forwarding uses the same syntax as rvalue reference which is misleading at first glance.
+\footnote{There was a proposition to use \texttt{\&\&\&},
+finally refused which seems not to be a good decision.} Because of that, we need to have a clear view of what the perfect forwarding is. To enable perfect forwarding
+\begin{enumerate}
+    \item The type of parameter has to be a template parameter of the function.
+    \item Call parameter must be taken as a \textbf{pure reference}, so without \texttt{cv}-qualifiers.
+    \item Parameter should be forwarded by calling \texttt{std::forward} function.
+\end{enumerate}
+
+    The correction of the motivating example enriched with perfect forwarding looks as this
+\begin{Code}
+    #include <iostream>
+    #include <string>
+
+    namespace detail
+    {
+        void print(const std::string&)
+        {
+            std::cout << "const std::string&" << std::endl;
+        }
+        
+        void print(const std::string&&)
+        {
+            std::cout << "const std::string&&" << std::endl;
+        }
+        
+        void print(std::string&)
+        {
+            std::cout << "std::string&" << std::endl;
+        }
+        
+        void print(std::string&&)
+        {
+            std::cout << "std::string&&" << std::endl;
+        }
+    }  // namespace detail
+
+    /* Perfect forwarding */
+    template <typename T>
+    void print(T&& arg)
+    {
+        detail::print(std::forward<T>(arg));
+    }
+    
+    int main()
+    {
+        const std::string cstr { "cstring" };
+
+        /* Prints "const std::string&" */
+        print(cstr);
+
+        /* Prints "const std::string&&" */
+        print(std::move(cstr));
+    
+        std::string str { "string" };
+        
+        /* Prints "std::string&" */
+        print(str);
+
+        /* Prints "std::string&&" */
+        print(std::move(str));
+    
+        return 0;
+    } 
+\end{Code}
+
+    We pointed out that \texttt{\&\&} might give the impression that the usual rules for rvalue references apply. However not in this case.
+An rvalue reference, not qualified with \texttt{const} and \texttt{volatile}, of function template parameter doesn't follow the rules of ordinary rvalue references.
+This type of reference is called a \textbf{universal reference} or \textbf{forwarding reference} and
+\begin{itemize}
+    \item it can universally bind to objects of all types (\texttt{const}, non-\texttt{const}) and value categories,
+    \item it is usually used to forward arguments.
+\end{itemize}
+\noindent
+    The most important rule to remember is that \textbf{the universal reference doesn't have any \texttt{cv}-qualifiers, so adding one of \texttt{const} or \texttt{volatile}
+before the \texttt{\&\&} qualifier creates usual rvalue reference!}\newline
+
+    As a summarization, if we have a function
+\begin{Code}
+    template <typename T>
+    return_type function(T&& arg);
+\end{Code}
+where \texttt{return\_type} is some type, the type \texttt{T\&\&} is
+\begin{itemize}
+    \item lvalue reference, if we refer to lvalue;
+    \item rvalue reference, if we refer to rvalue.
+\end{itemize}
+
+    The fact that ordinary rvalue references and universal references share the same syntax creates multiple problems.
+The most important is that we cannot declare a universal reference of a specific type. However, since C++17 we can use the following workaround (in C++20 we can have \texttt{requires} instead)
+\begin{Code}
+    #include <iostream>
+    #include <type_traits>
+    
+    using namespace std;
+    
+    template <typename T,
+              typename = enable_if_t<is_convertible_v<T, string>>>
+    void print(T&& arg)
+    {
+        cout << "Argument: " << arg << endl;
+    }
+    
+    int main()
+    {
+        print("string");
+        /* Won't compile since int cannot be converted to std::string */
+        // print(1);
+    
+        return 0;
+    } 
+\end{Code}
+
+    One more example of misleading rvalue references and universal references can be pointed out - \textbf{an rvalue reference to template parameter of class
+is not a universal reference!}
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    template <typename T>
+    struct Data
+    {
+        Data() = default;
+        
+        void insert(T&& value)
+        {
+            m_items.push_back(std::forward<T>(value));
+        }
+    
+        std::vector<T> m_items;
+    };
+    
+    int main()
+    {
+        Data<int> data;
+        const int value = 0;
+        
+        /* Won't work since insert() expects rvalue! */
+        // data.insert(value);
+        return 0;
+    } 
+\end{Code}
+but of course we can fix this using \texttt{<type\_traits>} by
+declaring the function insert as template one
+\begin{Code}
+    template <typename U = T,
+              typename = std::enable_if_t<std::is_convertible_v<U, T>>>
+    void insert(U&& value)
+    {
+        m_items.push_back(std::forward<U>(value));
+    }
+\end{Code}
+
+    To finish this part, it also shouldn't be a surprise that partial
+specialization also doesn't work like universal references.
+
+\subsection{Overload resolution with universal references}
+    The following table presents the precedence of overload resolution of
+the function. The lower the value of the number the higher the priority
+of resolution we have (so 1 is the higher one).
+The \textit{no} value means that there is no possible call.
+\begin{center}
+    \footnotesize
+    \resizebox{\textwidth}{!}{%
+        \begin{tabular}{|c|c|c|c|c|c|}
+            \hline
+            \textbf{Call} & \textbf{\texttt{f(X\&)}} & \textbf{\texttt{f(const X\&)}} & \textbf{\texttt{f(X\&\&)}} & \textbf{\texttt{f(const X\&\&)}} & \textbf{\begin{tabular}[c]{@{}c@{}}\texttt{template <typename T>} \\ \texttt{f(T\&\&)}\end{tabular}} \\
+            \hline
+            \textbf{\texttt{f(v)}} & 1 & 3 & no & no & 2 \\
+            \hline
+            \textbf{\texttt{f(c)}} & no & 1 & no & no & 2 \\
+            \hline
+            \textbf{\texttt{f(X\{\})}} & no & 4 & 1 & 3 & 2 \\
+            \hline
+            \textbf{\texttt{f(std::move(v))}} & no & 4 & 1 & 3 & 2 \\
+            \hline
+            \textbf{\texttt{f(std::move(c))}} & no & 3 & no & 1 & 2 \\
+            \hline
+        \end{tabular}%
+    }
+\end{center}
+
+    As we see, \textbf{the universal reference is always the second-best
+option}. A perfect match is always better, but the need to convert the
+type (even making \texttt{const} or converting rvalue to lvalue) is a
+worse match than just instantiating the function template for an exact 
+match.\newline
+
+    The fact that a universal reference binds better than a type
+conversion in overload resolution has a very nasty side effect -
+if we have a constructor that takes a single universal reference, this is 
+a better match than:
+\begin{itemize}
+    \item the copy constructor if passing a non-\texttt{const} object,
+    \item the move constructor if passing a \texttt{const} object.
+\end{itemize}
+
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    
+    struct Data
+    {
+        Data() = default;
+    
+        Data(const Data&)
+        {
+            std::cout << "const Data& constructor" << std::endl;
+        }
+    
+        Data(Data&&)
+        {
+            std::cout << "Data&& constructor" << std::endl;
+        }
+    
+        template <typename T>
+        Data(T&&)
+        {
+            std::cout << "Universal constructor" << std::endl;
+        }
+    };
+    
+    int main()
+    {
+        const Data cdata;
+        Data data;
+    
+        /* Prints "const Data& constructor" */
+        Data copy0 { cdata };
+        
+        /* Prints "Universal constructor" */
+        Data copy1 { data };
+    
+        /* Prints "Universal constructor" because of const qualifier */
+        Data move0 { std::move(cdata) };
+        
+        /* Prints "Data&& constructor" */
+        Data move1 { std::move(data) };
+    
+        return 0;
+    }
+\end{Code}
+
+\subsection{Universal reference collapsing rule}
+    When universal reference is used, the C++ standard applies the following rule of reference resolution
+\begin{itemize}
+    \item \textbf{\texttt{(T\&)\&}} is \textbf{\texttt{T\&}},
+    \item \textbf{\texttt{(T\&\&)\&}} is \textbf{\texttt{T\&\&}},
+    \item \textbf{\texttt{(T\&)\&\&}} is \textbf{\texttt{T\&}},
+    \item \textbf{\texttt{(T\&\&)\&\&}} is \textbf{\texttt{T\&\&}}.
+\end{itemize}
+
+\subsection{\texttt{std::move} and \texttt{std::forward}}
+    Let's start with possible implementations of these functions. The \texttt{std::forward} function can look like that one
+\begin{Code}
+    template <typename T>
+    inline T&& forward(typename std::remove_reference<T>::type& t) noexcept
+    {
+        return static_cast<T&&>(t);
+    }
+\end{Code}
+\noindent
+when \texttt{std::move()} would be implemented like this
+\begin{Code}
+    template <typename T>
+    typename remove_reference<T>::type&& move(T&& arg)
+    {
+        return static_cast<typename remove_reference<T>::type&&>(arg);
+    }
+\end{Code}
+\noindent
+Since \texttt{std::forward} is a template function we can directly cast one type to another using collapsing rules
+\begin{itemize}
+    \item \texttt{std::forward<T>(t)} = \texttt{static\_cast<T\&\&>(t)}
+    \item \texttt{std::forward<T\&>(t)} = \texttt{static\_cast<(T\&)\&\&>(t)} \\ = \texttt{static\_cast<T\&>(t)}
+    \item \texttt{std::forward<const T\&>(t)} = \texttt{static\_cast<(const T\&)\&\&>(t)} \\ = \texttt{static\_cast<const T\&>(t)}
+    \item \texttt{std::forward<T\&\&>(t)} = \texttt{static\_cast<(T\&\&)\&\&>(t)} \\ = \texttt{static\_cast<T\&\&>(t)}
+\end{itemize}
+
+    The important question is when and where we should use these functions. A quick guide might be helpful
+\begin{itemize}
+    \item This is \textbf{rvalue reference}
+    \begin{Code}
+        void function(std::string&& value);
+    \end{Code}
+    \noindent
+    Here we use \texttt{std::move()} so with any \textbf{non-template} type (like \texttt{int}, \texttt{std::string} etc.)
+    \item This is \textbf{universal/forwarding reference}
+    \begin{Code}
+        template <typename T>
+        void function(T&& value);
+    \end{Code}
+    \noindent
+    Here we use \texttt{std::forward} so with any template type.
+\end{itemize}
+
+\subsection{Problems with the universal reference}
+    The common problem with the universal reference is when a compiler needs to deduce the type of the function having the second parameter of the same type as
+universal reference
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    template <typename T>
+    void insert(std::vector<T>& vector, T&& value)
+    {
+        vector.push_back(value);
+    }
+    
+    int main()
+    {
+        std::vector<int> vector;
+        int value = 0;
+        
+        /* Won't compile due to conflicting type deduction:
+         *  - std::vector<T> deduces T as int
+         * - T&& being universal reference deduces T as const int&
+        */
+        // insert(vector, value);
+    
+        return 0;
+    }
+\end{Code}
+
+    Thankfully, we have at least two options to fix it. First one is named as \texttt{insert\_1()} and employs \texttt{type\_traits}, the second
+one (\texttt{insert\_2()}) just uses the second template parameter.
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    #include <type_traits>
+    
+    template <typename T>
+    void insert_1(std::vector<std::remove_reference_t<T>>& vector,
+                  T&& value)
+    {
+        vector.push_back(value);
+    }
+    
+    template <typename T1, typename T2>
+    void insert_2(std::vector<T1>& vector, T2&& value)
+    {
+        vector.push_back(value);
+    }
+    
+    int main()
+    {
+        std::vector<int> vector;
+        int value = 0;
+        
+        insert_1(vector, value);
+        insert_2(vector, value);
+    
+        return 0;
+    }
+\end{Code}
+
+\subsection{Universal reference and \texttt{auto}}
+    To save a calculated value and then forward it perfectly to the function, we have to use \texttt{auto\&\&} expression. Let's have a short look at the motivating example
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    
+    const std::string& get(const std::string& str)
+    {
+        return str;
+    }
+    
+    std::string& get(std::string& str)
+    {
+        return str;
+    }
+    
+    std::string&& get(std::string&& str)
+    {
+        return std::move(str);
+    }
+    
+    const std::string&& get(const std::string&& str)
+    {
+        return std::move(str);
+    }
+    
+    void print(const std::string&)
+    {
+        std::cout << "const std::string&" << std::endl;
+    }
+    
+    void print(std::string&)
+    {
+        std::cout << "std::string&" << std::endl;
+    }
+    
+    void print(const std::string&&)
+    {
+        std::cout << "const std::string&&" << std::endl;
+    }
+    
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+
+        /* auto = std::string */
+        auto value1 { get(cstr) };
+
+        /* auto = std::string */
+        auto value2 { get(str) };
+        
+        /* auto = std::string */
+        auto value3 { get(std::move(cstr)) };
+
+        
+        /* auto = std::string */
+        auto value4 { get(std::move(str)) };
+        
+        /* All these functions print "std::string&" since
+         * each value is non-const std::string
+         */
+        print(value1);
+        print(value2);
+        print(value3);
+        print(value4);
+    
+        return 0;
+    }
+\end{Code}
+
+    In this example, all of \texttt{auto}s don't store any information about the referenceness and constness of the type,
+\footnote{\texttt{auto} decays}
+thus we need some mechanism to correct it.
+As was mentioned below \ref{Reference qualifiers}, such mechanism is \texttt{auto\&\&} being just another type of forwarding or universal reference.
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    
+    const std::string& get(const std::string& str)
+    {
+        return str;
+    }
+    
+    std::string& get(std::string& str)
+    {
+        return str;
+    }
+    
+    std::string&& get(std::string&& str)
+    {
+        return std::move(str);
+    }
+    
+    const std::string&& get(const std::string&& str)
+    {
+        return std::move(str);
+    }
+    
+    void print(const std::string&)
+    {
+        std::cout << "const std::string&" << std::endl;
+    }
+    
+    void print(std::string&)
+    {
+        std::cout << "std::string&" << std::endl;
+    }
+    
+    void print(const std::string&&)
+    {
+        std::cout << "const std::string&&" << std::endl;
+    }
+    
+    void print(std::string&&)
+    {
+        std::cout << "std::string&&" << std::endl;
+    }
+    
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+
+        /* auto&& = const std::string& */
+        auto&& value1 { get(cstr) };
+
+        /* auto&& = std::string& */
+        auto&& value2 { get(str) };
+
+        /* auto&& = const std::string&& */
+        auto&& value3 { get(std::move(cstr)) };
+
+        /* auto&& = std::string&& */
+        auto&& value4 { get(std::move(str)) };
+        
+        /* Notice how to use std::forward here! */
+        /* Prints "const std::string& " */
+        print(std::forward<decltype(value1)>(value1));
+
+        /* Prints "std::string&" */
+        print(std::forward<decltype(value2)>(value2));
+
+        /* Prints "const std::string&&" */
+        print(std::forward<decltype(value3)>(value3));
+
+        /* Prints "std::string&&" */
+        print(std::forward<decltype(value4)>(value4));
+        
+        return 0;
+    }
+\end{Code}
+\noindent
+\textbf{It is super important to use \texttt{std::forward<decltype<T>(t)} to perfectly forward the value with the exact type.}. If we didn't use it
+we would get\linebreak \texttt{print(std::string)} for all cases (we would decay).\newline
+
+    As was said \textbf{if we declare something with \texttt{auto\&\&}, we also declare a universal reference}.
+We define a reference that binds to all value categories where the type of this reference preserves the type and value category. By the rule,
+the type of reference \texttt{auto\&\&} is
+\begin{itemize}
+    \item an lvalue reference, if we refer to lvalue;
+    \item an rvalue reference, if we refer to rvalue.
+\end{itemize}
+
+    Recall \ref{Reference qualifiers} again to explain how the
+range-\texttt{for} loop is implemented. There was a snippet
+\begin{Code}
+    auto && __range = range_expression ;
+    begin_expr = std::begin(__range);
+    end_expr = std::end(__range);
+\end{Code}
+    The \texttt{\_\_range} expression is the universal reference. The reason for having it is obvious - we need to bind every type of data without
+redundant copies done by \texttt{std::begin(\_\_range)} and \texttt{std::end(\_\_range)} and without losing the information about reference type
+and \texttt{cv}-qualifiers. Remember that \textbf{there is no other way to do it!}\newline
+
+    In the generic code, when we can't assume anything about the container value type, we need to use universal reference as well
+\begin{Code}
+    #include <functional>
+    #include <iostream>
+    #include <string>
+    #include <vector>
+    
+    template <typename T>
+    void iterate(T&& container)
+    {
+        /* Binds to any type of a value */
+        for (auto&& item: container)
+        {
+            std::cout << item << " ";
+        }
+        std::cout << std::endl;
+    }
+    
+    int main()
+    {
+        std::string str {"str"};
+        iterate(str);
+        
+        int a = 1;
+        int b = 2;
+        int c = 3;
+        
+        std::vector<std::reference_wrapper<int>> vector { a, b, c };
+        iterate(vector);
+    
+        /* Special case - std::vector<bool> is not the vector of copies!
+         * Check cppreference for more details
+         */
+        iterate(std::vector<bool> {false, true, false});
+        
+        return 0;
+    }
+\end{Code}
+
+\subsubsection{Universal reference and lambda}
+    Since C++14 we can use \texttt{auto} keyword in lambdas, which implies the kind of universal reference we're discussing in this section
+\begin{Code}
+    #include <functional>
+    #include <iostream>
+    #include <string>
+    
+    void print(const std::string&)
+    {
+        std::cout << "const std::string&" << std::endl;
+    }
+    
+    void print(std::string&)
+    {
+        std::cout << "std::string&" << std::endl;
+    }
+    
+    void print(const std::string&&)
+    {
+        std::cout << "const std::string&&" << std::endl;
+    }
+    
+    void print(std::string&&)
+    {
+        std::cout << "std::string&&" << std::endl;
+    }
+    
+    int main()
+    {
+        const auto lambda = [](auto&& arg)
+        {
+            /* Notice decltype(arg)! */
+            print(std::forward<decltype(arg)>(arg));
+        };
+        
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+
+        /* Prints "const std::string& */
+        lambda(cstr);
+
+        /* Prints "std::string&" */
+        lambda(str);
+
+        /* Prints "const std::string&&" */
+        lambda(std::move(cstr));
+
+        /* Prints "std::string&&" */
+        lambda(std::move(str));
+        
+        return 0;
+    }
+\end{Code}
+\noindent
+As for the template-type universal reference, adding any of \texttt{cv}-qualifier will replace the universal reference with a regular rvalue reference.
+
+\subsection{Perfect returning}
+\label{Perfect returning}
+    Here is the motivating example of why \texttt{auto}
+is not the best option for all cases. We've discussed it briefly before, 
+so here is just a reminder
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <type_traits>
+    
+    namespace detail
+    {
+        const std::string& get(const std::string& str)
+        {
+            return str;
+        }
+        
+        std::string& get(std::string& str)
+        {
+            return str;
+        }
+        
+        std::string&& get(std::string&& str)
+        {
+            return std::move(str);
+        }
+        
+        const std::string&& get(const std::string&& str)
+        {
+            return std::move(str);
+        }
+    }
+    
+    /* auto keyword used */
+    template <typename T>
+    auto get(T&& str)
+    {
+        return detail::get(std::forward<T>(str));
+    }
+    
+    template <typename T>
+    constexpr void check_type(T&& t)
+    {
+        using type = decltype(t);
+        if constexpr (std::is_same_v<type, std::string>)
+        {
+            std::cout << "std::string" << std::endl;
+        }
+        else if constexpr (std::is_same_v<type, const std::string&>)
+        {
+            std::cout << "const std::string&" << std::endl;
+        }
+        else if constexpr (std::is_same_v<type, std::string&>)
+        {
+            std::cout << "std::string&" << std::endl;
+        }
+        else if constexpr (std::is_same_v<type, const std::string&&>)
+        {
+            std::cout << "const std::string&&" << std::endl;
+        }
+        else if constexpr (std::is_same_v<type, std::string&&>)
+        {
+            std::cout << "std::string&&" << std::endl;
+        }
+        else
+        {
+            std::cout << typeid(T).name() << std::endl;
+        }
+    }
+    
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+    
+        /* All these functions print "std::string" */
+        check_type(get(cstr));
+        check_type(get(str));
+        check_type(get(std::move(cstr)));
+        check_type(get(std::move(str)));
+    
+        return 0;
+    }
+\end{Code}
+
+    We know that \texttt{auto} decays, so drops reference and
+\texttt{const} or \texttt{volatile}. What is worse, in such cases we might
+create an unnecessary copy when the object is returned.
+\textbf{The solution is to add \texttt{decltype} keyword} so instead
+\begin{Code}
+    template <typename T>
+    auto get(T&& str)
+    {
+        return detail::get(std::forward<T>(str));
+    }
+\end{Code}
+we should have
+\begin{Code}
+    template <typename T>
+    decltype(auto) get(T&& str)
+    {
+        return detail::get(std::forward<T>(str));
+    }
+\end{Code}
+and the result is
+\begin{Code}
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+
+        /* Prints "const std::string&" */
+        check_type(get_wrapper(cstr));
+
+        /* Prints "std:string&" */
+        check_type(get_wrapper(str));
+
+        /* Prints "const std::string&&" */
+        check_type(get_wrapper(std::move(cstr)));
+
+        /* Prints "std::string&&" */
+        check_type(get_wrapper(std::move(str)));
+    
+        return 0;
+    }
+\end{Code}
+
+    The \texttt{decltype(auto)} expression is a placeholder type that tells the compiler to deduce type at initialization time.
+The rules which the compiler uses to find the proper type are
+\begin{enumerate}
+    \item if we initialize it with or return a plain name, the return type is the type of the object with that name,
+    \item if we initialize it with or return an expression, the return type is the type and value category of the evaluated expression and
+    \begin{itemize}
+        \item for a prvalue it yields its value, so the type is \texttt{T},
+        \item for a lvalue, it yields its type as an lvalue reference, so the type is \texttt{T\&},
+        \item for a xvalue, it yields its type as an rvalue reference, so the type is \texttt{T\&\&}.
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Deferred perfect returning}
+    If we need to perfectly return the value computed before,
+\textbf{we need to declare this local object with \texttt{decltype(auto)}}
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    template <typename T>
+    decltype(auto) get(T&& arg)
+    {
+        /* Notice the importance of std::forward! */
+        decltype(auto) to_return { std::forward<T>(arg) };
+        
+        /* Perfectly forward the result */
+        return std::forward<decltype(to_return)>(to_return);
+    }
+\end{Code}
+\noindent
+and printouts are
+\begin{Code}
+    int main()
+    {
+        const std::string cstr { "cstring" };
+        std::string str { "string" };
+
+        /* Prints "const std::string&" */
+        check_type(get(cstr));
+
+        /* Prints "std:string&" */
+        check_type(get(str));
+
+        /* Prints "const std::string&&" */
+        check_type(get(std::move(cstr)));
+
+        /* Prints "std::string&&" */
+        check_type(get(std::move(str)));
+    
+        return 0;
+    }
+\end{Code}
+
+\subsubsection{Perfect returning with lambdas}
+    As always, we're going to start with the motivating example
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    int main()
+    {
+        const auto identity = [](auto&& container)
+        {
+            return container;
+        };
+        
+        std::vector<int> vector { 1, 2, 3 };
+        /* Won't compile! */
+        //  std::vector<int>& copy = identity(vector);
+        // for (auto&& value : copy)
+        // {
+        //      std::court << value << " ";
+        // }
+        
+        return 0;
+    }
+\end{Code}
+\noindent
+The compilation breaks because of the line
+\begin{Code}
+    std::vector<int>& copy = identity(vector)
+\end{Code}
+The lambda \texttt{identity} is implemented implicitly as follows
+
+\begin{Code}
+const auto identity = [](auto&& container) -> auto
+{
+    return container;
+}
+\end{Code}
+\noindent
+which is the same as
+\begin{Code}
+template <typename T>
+auto identity(T&& container)
+{
+    return container;
+}
+\end{Code}
+\noindent
+This might create a copy, but for sure doesn't return a reference. The solution is to add \texttt{decltype(auto)} explicitly
+\begin{Code}
+    #include <iostream>
+    #include <vector>
+    
+    int main()
+    {
+        /* decltype(auto) instead of "raw" auto */
+        const auto identity = [](auto&& container) -> decltype(auto)
+        {
+            return container;
+        };
+        
+        std::vector<int> vector { 1, 2, 3 };
+        
+        std::vector<int>& copy = identity(vector);
+        
+        /* Prints "1 2 3" */
+        for (auto&& value : copy)
+        {
+            std::cout << value << " ";
+        }
+        
+        return 0;
+    }
+\end{Code}
+\end{document}

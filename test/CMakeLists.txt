@@ -1,0 +1,2 @@
+add_subdirectory(algorithms_and_structures)
+add_subdirectory(design_patterns)

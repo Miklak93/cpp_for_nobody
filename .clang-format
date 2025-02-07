@@ -1,0 +1,11 @@
+BasedOnStyle: Google  # You can use other styles like LLVM, Chromium, etc., as a base.
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 150
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Empty
+SortIncludes: false
+AccessModifierOffset: 0  # No extra offset for access specifiers
+IndentAccessModifiers: false  # Do not indent the lines under access specifiers
+

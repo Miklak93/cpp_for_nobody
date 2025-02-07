@@ -1,0 +1,296 @@
+\documentclass[../main]{subfiles}
+
+\begin{document}
+\chapter{C++14}
+\section{Basics}
+\subsection{\texttt{auto} as a result of function}
+    From now the compiler can deduce a returning type of the expression
+\begin{Code}
+    #include <iostream>
+    
+    template <typename T1, typename T2>
+    auto multiply(T1 t1, T2 t2)
+    {
+        return t1 * t2;
+    }
+    
+    int main()
+    {
+        std::cout << multiply(1, 2.0) << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+If there is more than one \texttt{return} statement, the compiler will check their consistency - if they are not the same, compilation will fail
+(even if there is a conversion from one type to another)
+\begin{Code}
+    #include <iostream>
+    
+    template <typename T1, typename T2>
+    auto max(T1 t1, T2 t2)
+    {
+        if (t1 < t2)
+        {
+            return t2;
+        }
+        return t1;
+    }
+    
+    int main()
+    {
+        /* error: inconsistent deduction for auto return type */
+        // std::cout << max(1, 2.0) << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+
+    In \ref{Perfect returning} subchapter we will discuss the way of using \texttt{decltype(auto)}, also available since C++14. The only thing
+    we have to keep in mind is that \texttt{decltype} gives the declared type of the expression that is passed to it. The \texttt{auto}
+    keyword does the same thing as template type deduction so, for example, if you have a function that returns a reference, \texttt{auto} will
+    still be a value (you need \texttt{auto\&} to get a reference), but \texttt{decltype} will be exactly the type of the return value.
+
+\subsection{The variable template}
+    C++ introduces, in addition to class and function templates, the template of variables. Beyond the ability to avoid
+casting (by creating the variable of perfectly matching type), we can employ them to type traits. Since now, we don't need
+to create special structures with \texttt{value} member - we just can have a single variable.
+\begin{Code}
+    #include <iostream>
+    #include <string>
+    #include <type_traits>
+    
+    /* For any given type be false */
+    template <typename T>
+    /* Must be constexpr ! */
+    constexpr bool is_string_v = false;
+    
+    /* For string be true */
+    template <>
+    constexpr bool is_string_v<std::string> = true;
+    
+    template <typename T,
+              std::enable_if_t<is_string_v<T>, bool> = true>
+    void info(const T&)
+    {
+        std::cout << "std::string" << std::endl;
+    }
+    
+    template <typename T,
+              std::enable_if_t<!is_string_v<T>, bool> = true>
+    void info(const T&)
+    {
+        std::cout << "not std::string" << std::endl;
+    }
+    
+    int main()
+    {
+        /* Prints "not std::string" */
+        info(int {});
+
+        /* Prints "std::string" */
+        info(std::string {});
+    
+        return 0;
+    }
+\end{Code}
+
+\section{Functions}
+\subsection{A \texttt{constexpr} function}
+    Starting from C++14, many of the constraints of \texttt{constexpr} functions are relaxed. Since now we can
+\begin{itemize}
+    \item use loops,
+    \item use \texttt{switch} and \texttt{if} statements,
+    \item use define own \texttt{constexpr} variables inside the body of \texttt{constexpr} function.
+\end{itemize}
+
+    Let's get back to the example \ref{Binary numbers} and rewrite it with our new opportunities
+\begin{Code}
+    constexpr std::size_t to_int(char c)
+    {
+        return c - 48;
+    }
+    
+    constexpr std::size_t bin_power(std::size_t N)
+    {
+        if (N == 0)
+        {
+            return 1;
+        }
+        
+        std::size_t value { 1 };
+        for (int i = 0; i < N; ++i)
+        {
+            value *= 2;
+        }
+        return value;
+    }
+    
+    constexpr std::size_t to_dec_base(const char* arr, std::size_t size)
+    {
+        std::size_t acc { 0 };
+        for (std::size_t i = 0; i < size; i++)
+        {
+            acc += bin_power(size - 1 - i) * to_int(arr[i]);
+        }
+        return acc;
+    }
+    
+    constexpr std::size_t operator"" _bin(const char* bits)
+    {
+        if (bits[0] == '\0')
+        {
+            return 0;
+        }
+        
+        std::size_t size { 0 };
+        while (bits[size] != '\0')
+        {
+            size++;
+        }
+        return to_dec_base(bits, size);
+    }
+
+    /* IDE prints "9" */
+    constexpr std::size_t dec = 1001_bin;
+\end{Code}
+
+\subsection {Lambdas}
+    The C++14 standard extends lambda capabilities to have \textbf{universal type of paramenter}, for instance
+\begin{Code}
+    /* Lambda can have universal parameter type */
+    [](auto u, auto v) { return u + v; };
+\end{Code}
+\noindent
+The mechanism behind the universal lambda is that the compiler converts it into the functor with the template \texttt{operator()} function, thus
+in our case, it could be
+\begin{Code}
+    struct Lambda
+    {
+        template <typename T1, typename T2>
+        auto operator(T1 t1, T2 t2) { return t1 + t2; }
+    };
+\end{Code}
+
+    Apart from universal parameters, C++14 gives us one more convenient tool which is initialization in the capture list
+\begin{Code}
+    #include <iostream>
+    
+    int main()
+    {
+        int value = 1;
+        
+        /* Named variable in the capture list */
+        auto lambda = [shift = value * 3](auto u, auto v)
+        {
+            return u + v + shift;
+        };
+        
+        /* Prints "6" */
+        std::cout << lambda(1, 2) << std::endl;
+    
+        return 0;
+    }
+\end{Code}
+\noindent
+That is done by adding a member to the functor
+\begin{Code}
+    #include <iostream>
+    
+    template <typename Shift>
+    struct Lambda
+    {
+        explicit Lambda(Shift shift):
+            m_shift(shift)
+        {
+        }
+        
+        template <typename T1, typename T2>
+        auto operator()(T1 t1, T2 t2)
+        {
+            return t1 + t2 + m_shift;
+        }
+        
+        Shift m_shift;
+    };
+    
+    int main()
+    {
+        int value = 1;
+        
+        /* Prints "6" */
+        std::cout << Lambda<decltype(value)> { value * 3 } (1, 2)
+                  << std::endl;
+        return 0;
+    }
+\end{Code}
+
+    What is more, the lambda expression supports move semantics
+\begin{Code}
+    #include <iostream>
+    
+    struct Data
+    {
+        Data(): m_value(0)
+        {
+            std::cout << "Data" << std::endl;
+        }
+        
+        Data(const Data& data): m_value(data.m_value)
+        {
+            std::cout << "const Data&" << std::endl;
+        }
+        
+        Data(Data&& data): m_value(std::move(data.m_value))
+        {
+            data.m_value = 0;
+            std::cout << "Data&&" << std::endl;
+        }
+        
+        ~Data()
+        {
+            std::cout << "~Data" << std::endl;
+        }
+        
+        void set(int value)
+        {
+            m_value = value;
+        }
+        
+        int m_value;
+    };
+    
+    int main()
+    {
+        /* Prints "Data" */
+        Data data;
+        
+        /* Data is moved even if the lambda is not called! */
+        /* Prints "Data&&" */
+        auto lambda = [moved_data = std::move(data)] () mutable
+        {
+            moved_data.set(1);
+            return moved_data;
+        };
+        
+        /* Prints "const Data&" */
+        auto&& result = lambda();
+        
+        /* Prints "0" */
+        std::cout << data.m_value << std::endl;
+        
+        /* Prints "1" */
+        std::cout << result.m_value << std::endl;
+        
+        return 0;
+    }
+\end{Code}
+
+\section{Miscellaneous}
+    C++14 provided a bit more useful elements
+\begin{enumerate}
+    \item New attributes like \texttt{[[noreturn]]}, \texttt{[[deprecated]]} etc.
+    \item A separators in numbers \texttt{int value = 500`000`000}.
+    \item \texttt{new} and \texttt{delete} operators overloading.
+\end{enumerate}
+\end{document}

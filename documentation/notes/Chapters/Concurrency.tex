@@ -1,0 +1,1684 @@
+\documentclass[../main]{subfiles}
+
+\begin{document}
+\chapter{Concurrency}
+\section{\texttt{std::thread}}
+    The most fundamental type in C++ concurrency is \texttt{std::thread}. Threads begin execution of passed function immediately
+upon the construction of the associated thread object. We must remember to join or detach it, otherwise, the program
+will be immediately terminated when \texttt{std::thread} is destructing.
+\begin{Code}
+    #include <iostream>
+    #include <thread>
+
+    int main()
+    {
+        std::thread t1 { [] { std::cout << "Thread 1" << std::endl; } };
+        std::thread t2 { [] { std::cout << "Thread 2" << std::endl; } };
+
+        /* Don't wait for the thread till the end */
+        t1.detach();
+
+        /* Wait for the thread till the end */
+        t2.join();
+
+        return 0;
+    }
+\end{Code}
+\noindent
+It is important to remember that after a detachment of the thread, it cannot be joined again (thus, it cannot be taken ,,from the background'').\newline
+
+    If case of exception, we must join or detach \texttt{std::thread} inside a \texttt{catch} block. Otherwise, the whole program
+will end with \texttt{std::terminate()} immediately.
+
+\begin{Code}
+    #include <iostream>
+    #include <thread>
+
+    int main()
+    {
+        std::thread thread { [] { std::cout << "Thread" << std::endl; }};
+
+        try
+        {
+           throw std::runtime_error("Exception!");
+        }
+        catch(...)
+        {
+            std::cout << "Exception thrown!";
+            thread.join();
+            throw;
+        }
+
+        /* Will print "Exception thrown!" */
+        thread.join();
+
+        return 0;
+    }
+\end{Code}
+\noindent
+As it is not very convenient to repeat such an action, standard
+library provides classes \texttt{std::lock\_guard} and
+\texttt{std::unique\_lock}.
+
+\section{\texttt{std::mutex}}
+\subsection{Avoiding deadlocks}
+    Two or more mutexes can provoke a \textbf{deadlock problem} so the
+problem is when one thread is waiting for the second and the second
+is waiting for the first one.
+\begin{Code}
+    #include <mutex>
+    #include <thread>
+
+    int main()
+    {
+        std::mutex mutex1;
+        std::mutex mutex2;
+
+        static const auto lock_both = [](std::mutex& m1, std::mutex& m2)
+        {
+            m1.lock();
+            m2.lock();
+        };
+
+        std::thread thread1{[&] { lock_both(mutex1, mutex2); }};
+        std::thread thread2{[&] { lock_both(mutex2, mutex1); }};
+
+        thread1.join();
+        thread2.join();
+
+        /* Never reach this line */
+        return 0;
+    }
+\end{Code}
+
+    The common advice for avoiding deadlocks is to always lock them
+in the same order. The standard thread library introduces \texttt{std::lock()} function allowing
+to lock two or more mutexes. In C++17 there is an even better option \texttt{std::scoped\_lock}, a variadic template RAII class which is working similarly
+as \texttt{std::lock\_guard}, except that it may take more than one object.\newline
+
+    Another guideline to avoid deadlocks is not using a \textbf{nested locks}. The idea is simple - don't acquire a lock if we already hold one.
+An effective method of enforcing the proper order of mutex locking is to use a \texttt{hierarchical\_mutex}, which isn't a part of the standard library yet
+so must be written by the hand.
+\begin{Code}
+    #include <climits>
+    #include <chrono>
+    #include <exception>
+    #include <iostream>
+    #include <mutex>
+    #include <thread>
+
+    class hierarchical_mutex
+    {
+    public:
+        explicit hierarchical_mutex(unsigned long hierarchy_value):
+            m_hierarchy_value { hierarchy_value },
+            m_previous_hierarchy_value { 0 }
+        {
+        }
+
+        void lock()
+        {
+            check_for_hierarchy_violation();
+            m_mutex.lock();
+            update_hierarchy_value();
+        }
+
+        void unlock()
+        {
+            if (this_thread_hierarchy_value != m_hierarchy_value)
+            {
+                throw std::logic_error { "Mutex hierarchy violated" };
+            }
+
+            /* Like a popping from the stack - next hierachy_value taken */
+            this_thread_hierarchy_value = m_previous_hierarchy_value;
+
+            m_mutex.unlock();
+        }
+
+        bool try_lock()
+        {
+            check_for_hierarchy_violation();
+            if (!m_mutex.try_lock())
+            {
+                return false;
+            }
+            update_hierarchy_value();
+            return true;
+        }
+
+    private :
+        void check_for_hierarchy_violation()
+        {
+            if (this_thread_hierarchy_value <= m_hierarchy_value)
+            {
+                throw std::logic_error { "Mutex hierarchy violated!" };
+            }
+        }
+
+        void update_hierarchy_value()
+        {
+            m_previous_hierarchy_value = this_thread_hierarchy_value;
+            this_thread_hierarchy_value = m_hierarchy_value;
+        }
+
+        static thread_local unsigned long this_thread_hierarchy_value;
+
+        std::mutex m_mutex;
+        const unsigned long m_hierarchy_value;
+        unsigned long m_previous_hierarchy_value;
+    };
+
+    thread_local unsigned long
+        hierarchical_mutex::this_thread_hierarchy_value { ULONG_MAX };
+
+    using namespace std::chrono_literals;
+
+    hierarchical_mutex high_level_mutex { 100 };
+    hierarchical_mutex medium_level_mutex { 50 };
+    hierarchical_mutex low_level_mutex { 10 } ;
+
+    void low_level_function()
+    {
+        /* hierarchical_mutex has std::mutex api */
+        std::lock_guard<hierarchical_mutex> lock { low_level_mutex };
+        std::cout << "Low level function is working" << std::endl;
+    }
+
+    void high_level_function()
+    {
+        std::lock_guard<hierarchical_mutex> lock { high_level_mutex };
+        std::cout << "High level calls low level function" << std::endl;
+
+        /* Everything ok - lower priority function can be executed */
+        low_level_function();
+        std::this_thread::sleep_for(1s);
+    }
+
+    void medium_level_function()
+    {
+        /* Try to lock medium_level_mutex and then high_level_mutex first */
+        std::lock_guard<hierarchical_mutex> lock { medium_level_mutex };
+
+        std::cout << "Medium level function is working" << std::endl;
+        high_level_function();
+    }
+
+    int main()
+    {
+        std::thread thread1 { [] { high_level_function(); } };
+        std::thread thread2 { [] { medium_level_function(); }};
+
+        /* Printouts:
+        * "High level calls low level function"
+        * "Low level function is working"
+        * "Medium level function is working"
+        * and then the exception is thrown.
+        */
+        thread1.join();
+        thread2.join();
+
+        return 0;
+    }
+\end{Code}
+\noindent
+This kind of mutexes will effectively exclude the possibility of locking them in the wrong order.\newline
+
+    As a recap, there are basic functionalities related to \texttt{std::mutex}
+\begin{itemize}
+    \item \texttt{std::mutex} is a basic mechanism of data protection in a multithreaded environment. We saw the basic usage of it before.
+    \item \texttt{std::shared\_mutex} (since C++17, before we had \texttt{boost::shared\_mutex}) implements \textbf {read-write mutex} especially used
+    for rarely updated data. When data has to be read we use \texttt{std::shared\_lock} (since C++14, before we have to use \texttt{boost::shared\_lock}), but when
+    we need to update the data \texttt{std::lock\_guard} or \texttt{std::unique\_lock} shall be placed there instead. The idea is that\linebreak
+    \texttt{std::shared\_lock} is non-blocking for reading, but blocking for writing and \texttt{std::lock\_guard} (\texttt{std::unique\_lock}) blocks everything.\newline
+        The code below presents basic usage of \texttt{std::shared\_mutex} and may be useful for cases when \textbf{the resource is rarely updated}.
+    \begin{Code}
+        #include <chrono>
+        #include <iostream>
+        #include <mutex>
+        #include <shared_mutex>
+        #include <thread>
+        #include <vector>
+
+        using namespace std::chrono_literals;
+
+        using Data = std::vector<int>;
+
+        struct User
+        {
+            User(): m_mutex()
+            {
+            }
+
+            void read(const Data& data, std::size_t idx) const
+            {
+                std::shared_lock<std::shared_mutex> { m_mutex };
+                std::cout << "Read: " << data[idx] << std::endl;
+
+                /* Side note: Direct way of chrono::<time-unit>
+                 * initialization
+                 */
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(200));
+            }
+
+            void write(Data& data, std::size_t idx, int value)
+            {
+                std::lock_guard<std::shared_mutex> { m_mutex };
+                std::cout << "Changing value from " << data[idx]
+                          << " to " << value << std::endl;
+                data[idx] = value;
+
+                /* Side note: chrono::<time-unit> initialization
+                 * with chrono_literals
+                 */
+                std::this_thread::sleep_for(200ms);
+
+            }
+
+            /* Read-write mutex */
+            mutable std::shared_mutex m_mutex;
+        };
+
+        int main()
+        {
+            User user {};
+            Data data { 1, 2 };
+
+            std::thread thread1
+            {
+                &User::read, &user, std::ref(data), 0
+            };
+
+            std::thread thread2
+            {
+                &User::write, &user, std::ref(data), 0, 0
+            };
+
+            std::thread thread3
+            {
+                &User::read, &user, std::cref(data), 0
+            };
+
+            std::thread thread4
+            {
+                &User::read, &user, std::cref(data), 1
+            };
+
+            std::thread thread5
+            {
+                &User::write, &user, std::ref(data), 1, 1
+            };
+
+            std::thread thread6
+            {
+                &User::read, &user, std::cref(data), 1
+            };
+
+            thread1.join();
+            thread2.join();
+            thread3.join();
+            thread4.join();
+            thread5.join();
+            thread6.join();
+
+            return 0;
+        }
+    \end{Code}
+
+    \item \texttt{std::recursive\_mutex} can be locked multiple times \textbf{within the same thread}. Remember that the number of unlocks must be equal to
+    the number of locks. This kind of mutexes is usually a signal of bad code design and should be avoided.
+    \item \texttt{std::lock\_guard} implements RAII model with \texttt{std::mutex} lock during creation and \texttt{std::mutex} release during destruction.
+           It can take one more parameter \texttt{std::adopt\_lock} which informs the guard that the mutex is already locked.
+    \item \texttt{std::unique\_lock} is more flexible version of \texttt{std::lock\_guard} since it is equipped with \texttt{lock()}, \texttt{unlock()} and
+    \texttt{try\_lock()} functions to dynamic\linebreak \texttt{std::mutex} managing and also it can take \texttt{std::defer\_lock} keeping internal mutex
+    unlocked. As the name suggests, it cannot be copied but can be moved.
+    \item \texttt{std::lock} is a function that allows to locking of one or more mutex objects at the same time.
+    \item \texttt{std::scoped\_lock} is a variadic equivalent of \texttt{std::lock\_guard} introduced in C++17. It is preferred over ,,naked'' \texttt{std::lock}.
+    \item \texttt{std::once\_flag} and \texttt{std::call\_once} prevents locking mutex more than one time. This is useful for \textbf{lazy initialization} i.e.
+    when data must initialized just one time, it is counter-effective to use one of \texttt{std::lock\_guard} and \texttt{std::unique\_lock},
+    each time we need to obtain a lock, to check whether the data was initialized or not.
+    In these cases, the better option, in terms of performance, relies on \texttt{std::call\_once}.
+    \begin{Code}
+        #include <iostream>
+        #include <mutex>
+        #include <numeric>
+        #include <thread>
+        #include <vector>
+
+        struct Data
+        {
+            Data() = default;
+
+            void init()
+            {
+                std::cout << "Initialization begins" << std::endl;
+                std::iota(m_resources.begin(), m_resources.end(), 0);
+                std::cout << "Initialization ends" << std::endl;
+            }
+
+            std::vector<int> m_resources;
+        };
+
+        struct Initializer
+        {
+            Initializer():
+                m_data(),
+                is_initialized()
+            {
+            }
+
+            void init_once()
+            {
+                std::call_once(is_initialized, &Data::init, &m_data);
+            }
+
+            Data m_data;
+            std::once_flag is_initialized;
+        };
+
+        int main()
+        {
+            Initializer initializer {};
+
+            /* Only one of these threads will initialize data */
+            std::thread thread1 { [&] { initializer.init_once(); } };
+            std::thread thread2 { [&] { initializer.init_once(); } };
+            std::thread thread3 { [&] { initializer.init_once(); } };
+            std::thread thread4 { [&] { initializer.init_once(); } };
+
+            /* "Initialization begins"
+             * "Initialization ends"
+             * will appear just one time
+             */
+            thread1.join();
+            thread2.join();
+            thread3.join();
+            thread4.join();
+
+            return 0;
+        }
+    \end{Code}
+\end{itemize}
+
+\section{Managing threads}
+    To get a rich description of the thread library see (Williams. Appendix D). Here we present only a few most important functionalities and tools.
+
+\subsection{\texttt{std::condition\_variable}}
+    The \texttt{std::condition\_variable} class allows a thread to wait for
+a condition to become true. \textbf{Instances of \texttt{std::condition\_variable} are neither copyable nor movable!}
+\begin{Code}
+    #include <condition_variable>
+    #include <iostream>
+    #include <mutex>
+    #include <thread>
+    #include <vector>
+
+    struct Collection
+    {
+        Collection():
+            m_resources(),
+            m_condition_variable(),
+            m_mutex()
+        {
+        }
+
+        void insert(int idx)
+        {
+            std::lock_guard<std::mutex> { m_mutex };
+
+            m_resources.push_back(idx);
+            std::cout << "Element " << idx << " inserted\n";
+
+            / * Only one waiting thread will be woken up */
+            m_condition_variable.notify_one();
+        }
+
+        void pop()
+        {
+            /* Here we are waiting until the vector is not empty.
+             * We have to pass unique_lock since m_condition_variable
+             * unlocks mutex when a condition is not fulfilled.
+             * That's why we cannot use std::lock_guad.
+             */
+            std::unique_lock<std::mutex> lock { m_mutex };
+
+            auto predicate = [this]{ return !m_resources.empty(); }
+            m_condition_variable.wait(lock, predicate);
+
+            std::cout << "Popping " << m_resources.back() << std::endl;
+            m_resources.erase(m_resources.end() - 1);
+        }
+
+        std::vector<int> m_resources;
+        std::condition_variable m_condition_variable;
+        std::mutex m_mutex;
+    };
+
+    int main()
+    {
+        Collection collection {};
+
+        std::thread thread1 {&Collection::pop, &collection};
+        std::thread thread2 {&Collection::pop, &collection};
+        std::thread thread3 {&Collection::insert, &collection, 1};
+        std::thread thread4 {&Collection::insert, &collection, 2};
+
+        thread1.join();
+        thread2.join();
+        thread3.join();
+        thread4.join();
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::future}}
+    The \texttt{std::future} provides a facility for handling
+asynchronous results that may be performed on another thread. The \texttt{std::future} an object is quite similar to\linebreak
+\texttt{std::unique\_ptr} so that it is a unique representation of the given future.
+We also have the \texttt{std::shared\_future} (similar to \texttt{std::shared\_ptr}), which allows to share the same future by multiple \texttt{std::shared\_future} objects. In case when the future is ready, all
+waiting threads get it at the same time. A specialization for \texttt{void} means that we are just waiting for a function to be finished.\newline
+
+For the given future we need to call one of \texttt{get()} or \texttt{wait()} functions. The difference between them is that a \texttt{get()} function
+returns a value when \texttt{wait()} only waits for the future readiness, to be obtained by \texttt{get()} further with immediate effect. We can call them
+only once - that is quite understandable, the future can be ready only one time.\newline
+
+    The most basic way to use futures is to combine them with \texttt{std::async()} function which can work asynchronously or
+synchronously depending on the argument:
+\begin{itemize}
+    \item \texttt{std::launch::asynch} - run the function asynchronously (in the moment of call).
+    \item \texttt{std::launch::deferred} - wait until \texttt{get()} or \texttt{wait()} will be called.
+    \item \texttt{std::launch::asynch | std::launch::deferred} - let the compiler choose the best option.
+\end{itemize}
+    Let's have a look on short example\footnote{This example is silly and has to be corrected.}.
+\begin{Code}
+    #include <algorithm>
+    #include <iostream>
+    #include <vector>
+    #include <future>
+
+    using Iter = decltype(std::declval<std::vector<int>>().begin());
+    using Size = decltype(std::declval<Iter>() - std::declval<Iter>());
+
+    Size sort(Iter begin, Iter end)
+    {
+        const auto elements { end - begin };
+        std::stable_sort(begin, end);
+        return elements;
+    }
+
+    /* std::future is movable but not copyable */
+    std::future<Size> invoke(Iter begin, Iter end,
+        std::launch launch = std::launch::async | std::launch::deferred)
+    {
+        return std::async(launch, &sort, begin, end);
+    }
+
+    int main()
+    {
+        std::vector<int> data {10, 1, -5, 4, 7, -9};
+
+        /* Run in separate thread */
+        auto size1 = invoke(data.begin(), data.begin() + 2,
+            std::launch::async);
+
+        /* Run when wait() or get() invoked */
+        auto size2 = invoke(data.begin() + 2, data.begin() + 4,
+            std::launch::deferred);
+
+        /* Default setup */
+        auto size3 = invoke(data.begin() + 4, data.end());
+
+        /* Prints "Sorted 6 elements */
+        std::cout << "Sorted " << size1.get() + size2.get() + size3.get()
+                  << " elements" << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::promise}}
+    The \texttt{std::promise} class template provides a means of setting an asynchronous result, which may be retrieved from another thread
+through an instance of \texttt{std::future}. The \texttt{std::promise} object doesn't set the variable in any mysterious,
+asynchronously way by itself, it is only a wrapper returning \texttt{std::future}.
+\begin{Code}
+    #include <iostream>
+    #include <future>
+
+    int main()
+    {
+        std::promise<int> promise;
+
+        /* No value set yet */
+        std::future<int> future = promise.get_future();
+
+        /* Set the value */
+        promise.set_value(1);
+
+        /* Prints "1" */
+        std::cout << future.get() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+    We set the value by invoking \texttt{set\_value()} and get it by
+\texttt{get\_future()}. When we need to store an exception
+we can either destroy the \texttt{std::promise} object
+(\texttt{broken promise} will be thrown) or use \texttt{set\_exception()}
+member function. Let's have a look at some multithreaded example
+\begin{Code}
+    #include <exception>
+    #include <future>
+    #include <iostream>
+    #include <numeric>
+    #include <thread>
+    #include <vector>
+
+    std::vector<int> prepare(bool throws = false)
+    {
+        if (throws)
+        {
+            throw std::runtime_error("Cannot prepare!");
+        }
+
+        std::vector<int> values(100000);
+        std::iota(values.begin(), values.end(), 0);
+        return values;
+    }
+
+    int main()
+    {
+        std::promise<std::vector<int>> values;
+        std::future<std::vector<int>> future = values.get_future();
+
+        /* Async run */
+        std::thread thread { [&]
+        {
+            try
+            {
+                values.set_value(std::move(prepare()));
+            }
+            catch (...)
+            {
+                /* Save last thrown exception */
+                values.set_exception(std::current_exception());
+            }
+        }};
+        thread.detach();
+
+        /* Do something in the meantime */
+        std::promise<std::vector<int>> error;
+        std::future<std::vector<int>> error_future = error.get_future();
+
+        /* Async run */
+        std::thread error_thread { [&]
+        {
+            try
+            {
+                error.set_value(std::move(prepare(true)));
+            }
+            catch (...)
+            {
+                error.set_exception(std::current_exception());
+            }
+        }};
+        error_thread.detach();
+
+        /* Check error first */
+        try
+        {
+            error_future.get();
+        }
+        catch (std::runtime_error err)
+        {
+            std::cout << err.what() << std::endl;
+        }
+
+        /* Back to initial task */
+        std::cout << "Last item=" << future.get().back;;
+
+        return 0;
+    }
+\end{Code}
+
+    Like above, we can perform some actions in the meantime and then
+get the result of a future.
+
+\subsection{\texttt{std::packaged\_task}}
+    The \texttt{std::packaged\_task} template class packages a function
+or other callable object so that when the function is invoked
+through \texttt{std::packaged\_task}, the result is stored as an
+asynchronous result for retrieval through an instance of \texttt{std::future}.
+It can be considered as an equivalent of \texttt{std::promise} for
+functions i.e. \texttt{std::promise} is related to future values and
+\texttt{std::packaged\_task} is related to future function calls.\newline
+
+    As for \texttt{std::promise}, \texttt{std::packaged\_task}
+doesn't invoke the function asynchronously by itself, it is only a wrapper
+returning \texttt{std::future}.
+\begin{Code}
+    #include <future>
+    #include <iostream>
+    #include <string>
+
+    std::string get() { return "Get"; }
+
+    int main()
+    {
+        std::packaged_task<std::string()> task { &get };
+        std::future<std::string> future = task.get_future();
+
+        std::cout << "Calling get() now: ";
+        /* It must be called, otherwise .get() will wait forever! */
+        task();
+        std::cout << "value=" << future.get() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+    Some more realistic example of \texttt{std::packaged\_task} usage is presented below
+\begin{Code}
+    #include <functional>
+    #include <future>
+    #include <iostream>
+    #include <thread>
+    #include <vector>
+
+    using Data = std::vector<std::size_t>;
+    using Function = std::function<std::size_t(const Data&)>;
+    using PackagedTask = std::packaged_task<std::size_t(const Data&)>;
+    using Future = std::future<std::size_t>;
+
+    struct ThreadPool
+    {
+        ThreadPool(): m_tasks()
+        {
+        }
+
+        template <typename Function>
+        void append(Function&& function)
+        {
+            auto task {PackagedTask{std::forward<Function>(function)}};
+            m_tasks.push_back(std::move(task));
+        }
+
+        std::vector<Future> get()
+        {
+            std::vector<Future> futures;
+            for (auto& task : m_tasks)
+            {
+                auto future = task.get_future();
+                futures.push_back(std::move(future));
+            }
+            return futures;
+        }
+
+        void invoke(const std::vector<Data>& datas)
+        {
+            std::vector<std::thread> threads;
+            for (std::size_t i = 0; i < m_tasks.size(); i++)
+            {
+                /* Important - tasks must be moved ! */
+                std::thread thread {std::move(m_tasks[i]),
+                    std::cref(datas[i])};
+                threads.push_back(std::move(thread));
+            }
+
+            for (auto& thread : threads)
+            {
+                thread.join();
+            }
+        }
+
+        std::vector<PackagedTask> m_tasks;
+    };
+
+    std::size_t GetFirst(const Data& data)
+    {
+        return data[0];
+    }
+
+    std::size_t GetSecond(const Data& data)
+    {
+        return data[1];
+    }
+
+    std::size_t GetThird(const Data& data)
+    {
+        return data[2];
+    }
+
+    int main()
+    {
+        std::vector<Data> Collection
+        {
+            { 1, 2, 3 },
+            { 10, 20, 30 },
+            { 100, 200, 300 }
+        };
+
+        ThreadPool threadPool;
+
+        threadPool.append(std::bind(&GetFirst,  std::placeholders::_1));
+        threadPool.append(std::bind(&GetSecond, std::placeholders::_1));
+        threadPool.append(std::bind(&GetThird,  std::placeholders::_1));
+
+        /* No mulithtreading yet */
+        auto futures { std::move(threadPool.get()) };
+
+        /* Async invoke */
+        threadPool.invoke(Collection);
+
+        for (auto& future : futures)
+        {
+            std::cout << future.get() << std::endl;
+        }
+
+        return 0;
+    }
+\end{Code}
+
+    \subsection{\texttt{std::barrier}}
+   The \texttt{std::barrier} class is a synchronization primitive
+introduced in C++20 as part of the \texttt{<barrier>} header.
+It is used to coordinate multiple threads, making them wait until
+a predefined number of threads (called \textbf{the arrival count})
+have reached a certain point in their execution (the synchronization point).\newline
+
+    Once all threads reach the synchronization point, the barrier can
+optionally execute a callback function (if provided) and then reset itself,
+allowing the threads to continue execution and reuse the barrier.
+\begin{Code}
+    #include <array>
+    #include <barrier>
+    #include <iostream>
+    #include <numeric>
+    #include <thread>
+    #include <future>
+
+    std::array<int, 5> data{};
+
+    template <typename Completion>
+    auto function(std::barrier<Completion>& barrier, int idx, int value)
+    {
+        data[idx] = value;
+        /* Without this line it is possible to get 0s only */
+        barrier.arrive_and_wait();
+
+        return std::accumulate(data.begin() + idx, data.end(),
+            int{1}, std::multiplies{});
+    }
+
+    int main()
+    {
+        std::ptrdiff_t threads_num = 5;
+        auto completion_function = []()
+        {
+            std::cout << "All threads have arrived!" << std::endl;
+        };
+
+        std::barrier barrier{threads_num, completion_function};
+
+        auto result1 = std::async(std::launch::async,
+            [&barrier]() { return function(barrier, 0, 2); });
+        auto result2 = std::async(std::launch::async,
+            [&barrier]() { return function(barrier, 1, 3); });
+        auto result3 = std::async(std::launch::async,
+            [&barrier]() { return function(barrier, 2, 4); });
+        auto result4 = std::async(std::launch::async,
+            [&barrier]() { return function(barrier, 3, 5); });
+        auto result5 = std::async(std::launch::async,
+            [&barrier]() { return function(barrier, 4, 6); });
+
+        /* The prinout contains numbers 720, 360, 120, 30, 6 */
+        std::cout << result1.get() << ","
+                  << result2.get() << ","
+                  << result3.get() << ","
+                  << result4.get() << ","
+                  << result5.get() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::latch}}
+    The \texttt{std::latch} is a synchronization primitive introduced in
+C++20. It is used to block threads until a specific number of threads have
+reached a certain point in their execution, at which point the latch
+"unlocks" and allows the threads to proceed. It is commonly used
+for situations where a set of threads needs to wait for a certain
+condition or event to occur before continuing.\newline
+
+    Unlike \texttt{std::barrier}, which can be reused for multiple
+synchronization phases, \texttt{std::latch} is one-time use.
+Once the latch has been "counted down" to zero, it cannot be reused.
+\begin{Code}
+    #include <array>
+    #include <future>
+    #include <latch>
+    #include <iostream>
+    #include <numeric>
+    #include <thread>
+
+    std::array<int, 3> data{};
+
+    auto function(std::latch& latch, int idx, int value)
+    {
+        if (!latch.try_wait())
+        {
+            data[idx] = value;
+
+            /* May be called as one function
+             * latch.arrive_and_wait();
+             */
+            latch.count_down();
+            latch.wait();
+            return std::accumulate(data.begin() + idx, data.end(),
+                int{1}, std::multiplies{});
+        }
+        return int{};
+    }
+
+    int main()
+    {
+        std::latch latch {3};
+
+        auto result1 = std::async(std::launch::async,
+            [&latch]() { return function(latch, 0, 2); });
+        auto result2 = std::async(std::launch::async,
+            [&latch]() { return function(latch, 1, 3); });
+        auto result3 = std::async(std::launch::async,
+            [&latch]() { return function(latch, 2, 4); });
+        auto result4 = std::async(std::launch::async,
+            [&latch]() { return function(latch, 0, 5); });
+        auto result5 = std::async(std::launch::async,
+            [&latch]() { return function(latch, 1, 6); });
+
+        /* The prinout contains numbers 24, 12, 4, 0, 0.
+         * Two zeros will appear at the end since
+         * the latch counter will drop to 0 after 3 threads
+         * will have done their job.
+         */
+        std::cout << result1.get() << ","
+                  << result2.get() << ","
+                  << result3.get() << ","
+                  << result4.get() << ","
+                  << result5.get() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::semaphore}}
+    The \texttt{std::semaphore} type has been introduced along with \texttt{std::barrier}
+and \texttt{std::latch}. It is a synchronization primitive that controls access to a shared
+resource by maintaining an internal counter. Threads can acquire or release permits,
+with the counter representing the number of available resources. A thread attempting
+to acquire a permit will be blocked if none are available until another thread releases one.
+
+    \texttt{std::semaphore} comes in two variants: \texttt{std::counting\_semaphore}, which
+allows the counter to have an arbitrary maximum value, and \texttt{std::binary\_semaphore},
+which behaves like a simple lock with a maximum count of one.
+
+\begin{Code}
+    #include <array>
+    #include <atomic>
+    #include <chrono>
+    #include <future>
+    #include <iostream>
+    #include <numeric>
+    #include <semaphore>
+    #include <thread>
+
+    std::array<int, 3> data{};
+
+    template <std::size_t N>
+    auto function(std::counting_semaphore<N>& semaphore, int idx, int value)
+    {
+        /* Wait until we have three threads working */
+        if (semaphore.try_acquire())
+        {
+            data[idx] = value;
+
+            /* Should be enough for this example */
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        else
+        {
+            return int{};
+        }
+
+        int result = std::accumulate(data.begin(), data.end(),
+            int{0}, std::plus{});
+
+        /* Decrease semaphore count */
+        semaphore.release();
+
+        return result;
+    }
+
+    int main()
+    {
+        /* LeastMaxValue is maximal value of counts,
+         * permits is number of locks allowed. In this example
+         * LeastMaxValue is defined by "max", permitted number
+         * of locks by "permits".
+         */
+
+        static constexpr std::ptrdiff_t max = 3;
+        for (std::ptrdiff_t permits{}; permits <= max; ++permits)
+        {
+            std::cout << "Permits=" << permits << std::endl;
+
+            std::counting_semaphore<max> semaphore{permits};
+
+            auto result1 = std::async(std::launch::async,
+                [&semaphore]() { return function<max>(semaphore, 0, 2); });
+            auto result2 = std::async(std::launch::async,
+                [&semaphore]() { return function<max>(semaphore, 1, 3); });
+            auto result3 = std::async(std::launch::async,
+                [&semaphore]() { return function<max>(semaphore, 2, 4); });
+            auto result4 = std::async(std::launch::async,
+                [&semaphore]() { return function<max>(semaphore, 0, 5); });
+            auto result5 = std::async(std::launch::async,
+                [&semaphore]() { return function<max>(semaphore, 1, 6); });
+
+            /* Observe decreasing number of 0s. Possible realisation of
+             * the entire loop
+             *
+             * Permits=0
+             * 0,0,0,0,0
+             *
+             * Permits=1
+             * 2,0,0,0,0
+             *
+             * Permits=2
+             * 5,5,0,0,0
+             *
+             * Permits=3
+             * 9,9,9,0,0
+             */
+            std::cout << result1.get() << ","
+                      << result2.get() << ","
+                      << result3.get() << ","
+                      << result4.get() << ","
+                      << result5.get() << std::endl;
+            std::cout << std::endl;
+        }
+
+        return 0;
+    }
+\end{Code}
+
+
+    As an extra, final example a very useful function (similar to Erlang's \texttt{spawn})
+to start asynchronous process dynamically
+\begin{Code}
+    #include <future>
+    #include <iostream>
+    #include <thread>
+    #include <vector>
+
+    template <typename Function, typename... Args>
+    std::future <typename std::result_of_t<Function(Args&&...)>>
+    spawn_task(Function&& function, Args&&... args)
+    {
+        using return_t = std::result_of_t<Function(Args&&...)>;
+
+        std::packaged_task<return_t(Args&&...)> task {std::move(function)};
+        std::future<return_t> future { task.get_future() };
+
+        std::thread thread {std::move(task), std::forward<Args>(args)...};
+        thread.detach();
+
+        return future;
+    }
+
+    template <std::size_t N>
+    std::size_t put(std::vector<int>& vec, int value)
+    {
+        vec[N] = value;
+        return N * value;
+    }
+
+    int main()
+    {
+        std::vector<int> vec (3);
+        auto future0 = spawn_task(&put<0>, std::ref(vec), 1);
+        auto future1 = spawn_task(&put<1>, std::ref(vec), 10);
+        auto future2 = spawn_task(&put<2>, std::ref(vec), 100);
+
+        std::cout << future0.get() << std::endl;
+        std::cout << future1.get() << std::endl;
+        std::cout << future2.get() << std::endl;
+    }
+\end{Code}
+
+\section{Atomic operations}
+    An \textbf{atomic operation} is indivisible operation. We can't observe such an operation half-done from any thread in the system;
+it's either done or not done. Some non-atomic operation might be seen as half-done by another thread.\newline
+
+\begin{center}
+    \textbf{This section must be updated, for now it contains only examples}
+\end{center}
+
+\subsection{Check lock free types}
+\begin{Code}
+    #include <iostream>
+    #include <atomic>
+
+    int main()
+    {
+        std::cout << "Is bool always lock free: "
+                  << std::atomic<bool>::is_always_lock_free
+                  << std::endl;
+        std::cout << "Is bool* always lock free: "
+                  << std::atomic<bool*>::is_always_lock_free
+                  << std::endl;
+
+        std::cout << "Is int always lock free: "
+                  << std::atomic<int>::is_always_lock_free
+                  << std::endl;
+        std::cout << "Is int* always lock free: "
+                  << std::atomic<int*>::is_always_lock_free
+                  << std::endl;
+
+        std::cout << "Is float always lock free: "
+                  << std::atomic<float>::is_always_lock_free
+                  << std::endl;
+        std::cout << "Is float* always lock free: "
+                  << std::atomic<float*>::is_always_lock_free
+                  << std::endl;
+
+        std::cout << "Is double always lock free: "
+                  << std::atomic<double>::is_always_lock_free
+                  << std::endl;
+        std::cout << "Is double* always lock free: "
+                  << std::atomic<double*>::is_always_lock_free
+                  << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::atomic\_flag}}
+\begin{Code}
+    #include <atomic>
+    #include <iostream>
+    #include <thread>
+    #include <vector>
+
+    struct spinlock_mutex
+    {
+        spinlock_mutex()
+         : flag(ATOMIC_FLAG_INIT)
+        {}
+
+        void lock()
+        {
+           while (flag.test_and_set());
+        }
+
+        void unlock() { flag.clear(); }
+
+        std::atomic_flag flag;
+    };
+
+    void write(int value, std::vector<int>& data, spinlock_mutex& mutex)
+    {
+        std::lock_guard<spinlock_mutex>{ mutex };
+        data.push_back(value);
+    }
+
+    void read(const std::vector<int>& data, spinlock_mutex& mutex)
+    {
+        std::lock_guard<spinlock_mutex>{ mutex };
+        for (auto&& item : data)
+        {
+           std::cout << item << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    int main()
+    {
+        spinlock_mutex mutex{};
+        std::vector<int> data;
+
+        std::thread thread1{ [&]() { write(1, data, mutex); } };
+        std::thread thread2{ [&]() { write(2, data, mutex); } };
+
+        /* May print "" or "1" or "2" or "1 2" or "2 1" */
+        std::thread thread3{ [&]() { read(data, mutex); } };
+        std::thread thread4{ [&]() { write(3, data, mutex); } };
+
+        /* May print "" or any possible result from "1 2 3" */
+        std::thread thread5{ [&]() { read(data, mutex); } };
+
+        thread1.join();
+        thread2.join();
+        thread3.join();
+        thread4.join();
+        thread5.join();
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{\texttt{std::atomic} template}
+    \textbf{Basic functionalities}
+\begin{Code}
+    #include <atomic>
+    #include <iostream>
+
+    int main()
+    {
+        std::atomic<int> atomic;
+
+        /* We can get only the copy of value stored inside,
+         * no reference!
+         */
+        // auto& init_value = atomic_bool.load();
+
+        auto init_value = atomic.load();
+
+        /* Prints "0" */
+        std::cout << init_value << std::endl;
+
+        /* It is also possible to read the value directly */
+        int automatic_cast_value = atomic;
+        std::cout << automatic_cast_value << std::endl;
+
+        /* Set the new value */
+        atomic.store(1);
+
+        /* Prints "1" */
+        std::cout << atomic.load() << std::endl;
+
+        /* fetch_add() and returns old value and performs
+         * atomic incremetation. It has its ++ and +=
+         * wrappers but there is no point to present them
+         * all.
+         */
+        /* Prints "1" */
+        std::cout << atomic.fetch_add(2) << std::endl;
+
+        /* Prints "3" */
+        std::cout << atomic << std::endl;
+
+        /* As equivalent of fetch_add() is fetch_sub() */
+        /* Prints "3" */
+        std::cout << atomic.fetch_sub(3) << std::endl;
+
+        /* Prints "0" */
+        std::cout << atomic << std::endl;
+
+        /* There are many more equivalents of standard operations for integers
+         * like fetch_and() (&), fetch_or (||), etc. See the documentation
+         * to learn more.
+        */
+
+        return 0;
+    }
+\end{Code}
+
+    \textbf{Compare-exchange weak} - normally used in the loop as may spontaneously  fail
+\begin{Code}
+    #include <atomic>
+    #include <iostream>
+
+    int main()
+    {
+        std::atomic<int> atomic;
+
+        /* Expected argument has to be passed by l-value reference! */
+        // std::cout << atomic.compare_exchange_weak(0, 1) << std::endl;
+        int expected = 0;
+
+        /* Prints "1" which means "true" and indicates success */
+        std::cout << atomic.compare_exchange_weak(expected, 1) << std::endl;
+
+        /* Prints "0" - value untouched */
+        std::cout << expected << std::endl;
+
+        /* Prints "1" */
+        std::cout << atomic.load() << std::endl;
+
+        /* Try to do the same - expected is still 0 */
+        /* Prints "0" which means "false" and indicates loss */
+        std::cout << atomic.compare_exchange_weak(expected, 1) << std::endl;
+
+        /* Prints "1" - the expected value has been updated with the value
+         * already stored in the atomic variable!
+         */
+        std::cout << expected << std::endl;
+
+        /* Prints "1" */
+        std::cout << atomic.load() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+    \textbf{Compare-exchange strong} - won't fail but may impact on performance (internal loop)
+\begin{Code}
+    #include <atomic>
+    #include <iostream>
+
+    int main()
+    {
+        std::atomic<int> atomic;
+
+        /* Expected argument has to be passed by l-value reference! */
+        // std::cout << atomic.compare_exchange_strong(0, 1) << std::endl;
+        int expected = 0;
+
+        /* Prints "1" which means "true" and indicates success */
+        std::cout << atomic.compare_exchange_strong(expected, 1) << std::endl;
+
+        /* Prints "0" - value untouched */
+        std::cout << expected << std::endl;
+
+        /* Prints "1" */
+        std::cout << atomic.load() << std::endl;
+
+        /* Try to do the same - expected is still 0 */
+        /* Prints "0" which means "false" and indicates loss */
+        std::cout << atomic.compare_exchange_strong(expected, 1) << std::endl;
+
+        /* Prints "1" - the expected value has been updated with the value
+         * already stored in the atomic variable!
+         */
+        std::cout << expected << std::endl;
+
+        /* Prints "1" */
+        std::cout << atomic.load() << std::endl;
+
+        return 0;
+    }
+\end{Code}
+
+\subsection{Memory model}
+\subsubsection{\texttt{std::memory\_order\_seq\_cst}}
+    \textbf{Standard model} - all threads see the same operations order
+\begin{Code}
+    #include <atomic>
+    #include <chrono>
+    #include <iostream>
+    #include <thread>
+    #include <vector>
+
+    std::vector<int> data;
+    std::atomic<bool> data_ready{ false };
+
+    void read()
+    {
+        /* (1) */
+        while (!data_ready.load())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        /* (2) */
+        std::cout << "value=" << data[0] << std::endl;
+    }
+
+    void write()
+    {
+        /* (3) */
+        data.push_back(0);
+
+        /* (4) */
+        data_ready = true;
+    }
+
+    int main()
+    {
+        std::thread thread1{ [&] { read(); } };
+        std::thread thread2{ [&] { write(); } };
+
+        thread1.join();
+        thread2.join();
+
+        return 0;
+    }
+\end{Code}
+
+    This is the same behavior as if the most strict \texttt{memory\_order\_seq\_cst} model used explicitly
+\begin{Code}
+    #include <atomic>
+    #include <cassert>
+    #include <iostream>
+    #include <thread>
+
+    std::atomic<bool> x{ false };
+    std::atomic<bool> y{ false };
+    std::atomic<int> z{ 0 };
+
+    void write_x()
+    {
+        x.store(true, std::memory_order_seq_cst);
+    }
+
+    void write_y()
+    {
+        y.store(true, std::memory_order_seq_cst);
+    }
+
+    void read_x_then_y()
+    {
+        while (!x.load(std::memory_order_seq_cst));
+        if (y.load(std::memory_order_seq_cst))
+        {
+            ++z;
+        }
+    }
+
+    void read_y_then_x()
+    {
+        while (!y.load(std::memory_order_seq_cst));
+        if (x.load(std::memory_order_seq_cst))
+        {
+            ++z;
+        }
+    }
+
+    int main()
+    {
+        std::thread thread1{ write_x };
+        std::thread thread2{ write_y };
+        std::thread thread3{ read_x_then_y };
+        std::thread thread4{ read_y_then_x };
+
+        thread1.join();
+        thread2.join();
+        thread3.join();
+        thread4.join();
+
+        /* This will never fail since all threads "saw" the same,
+         * global order of events. In other words threads HAVE TO
+         * agree on the order of events.
+         */
+        assert(z.load() != 0);
+
+        return 0;
+    }
+\end{Code}
+
+\subsubsection{\texttt{std::memory\_order\_relaxed}}
+    Only update is synchronized
+\begin{Code}
+    #include <atomic>
+    #include <cassert>
+    #include <iostream>
+    #include <thread>
+
+    std::atomic<bool> x{ false };
+    std::atomic<bool> y{ false };
+    std::atomic<int> z{ 0 };
+
+    void write_x_then_y()
+    {
+        /* In this thread x is modified before y */
+        x.store(true, std::memory_order_relaxed);
+        y.store(true, std::memory_order_relaxed);
+    }
+
+    void read_y_then_x()
+    {
+        /* However, because relaxed option is used
+         * there is no synchronization between threads
+         * so we have no guarantee that if y was set
+         * this implies (as order in write_x_then_y suggests)
+         * that x had been set before.
+         */
+        while (!y.load(std::memory_order_relaxed));
+        if (x.load(std::memory_order_relaxed))
+        {
+            ++z;
+        }
+    }
+
+    int main()
+    {
+        std::thread thread1{ write_x_then_y };
+        std::thread thread2{ read_y_then_x };
+
+        thread1.join();
+        thread2.join();
+
+        /* This might fail since all threads "didn't see" the same,
+         * global order of events. In other words threads DON'T
+         * HAVE TO agree on the order of events.
+         */
+        assert(z.load() != 0);
+
+        return 0;
+    }
+\end{Code}
+
+\subsubsection{\texttt{memory\_order\_release} and \texttt{memory\_order\_acquire}}
+\begin{Code}
+    #include <iostream>
+    #include <atomic>
+    #include <thread>
+    #include <assert.h>
+
+    std::atomic<bool> x{ false };
+    std::atomic<bool> y{ false };
+    std::atomic<int> z{ 0 };
+
+    void write_x()
+    {
+        /* std::memory_order_release is devoted to save values */
+        x.store(true, std::memory_order_release);
+    }
+
+    void write_y()
+    {
+        y.store(true, std::memory_order_release);
+    }
+
+    void read_x_then_y()
+    {
+        /* std::memory_order_acquire is devoted to load values */
+        while (!x.load(std::memory_order_acquire));
+        if (y.load(std::memory_order_acquire))
+        {
+            ++z;
+        }
+    }
+
+    void read_y_then_x()
+    {
+        while (!y.load(std::memory_order_acquire));
+        if (x.load(std::memory_order_acquire))
+        {
+            ++z;
+        }
+    }
+
+    int main()
+    {
+        std::thread thread1{ write_x };
+        std::thread thread2{ write_y };
+        std::thread thread3{ read_x_then_y };
+        std::thread thread4{ read_y_then_x };
+
+        thread1.join();
+        thread2.join();
+        thread3.join();
+        thread4.join();
+
+        /* This might fail since x and y are not synchronized.
+         * However, we have kind of control here, because
+         * even though we haven't synchronized x and y
+         * we've created a synchronization for x and y write-read
+         * operations by std::memory_order_release (for write) and
+         * std::memory_order_acquire (for read).
+         */
+        assert(z.load() != 0);
+
+        return 0;
+    }
+\end{Code}
+
+    Managing memory with \texttt{std::memory\_order\_relaxed} and \texttt{std::memory\_order\_seq\_cst}
+\begin{Code}
+    #include <atomic>
+    #include <cstring>
+    #include <iostream>
+    #include <thread>
+
+    struct Values
+    {
+        int x;
+        int y;
+        int z;
+    };
+
+    constexpr std::size_t ITERATIONS = 10;
+
+    std::atomic<int> x;
+    std::atomic<int> y;
+    std::atomic<int> z;
+    std::atomic<bool> start;
+
+    Values values1[ITERATIONS];
+    Values values2[ITERATIONS];
+    Values values3[ITERATIONS];
+    Values values4[ITERATIONS];
+    Values values5[ITERATIONS];
+
+    void reset()
+    {
+        x = 0;
+        y = 0;
+        z = 0;
+        start = false;
+
+        std::memset(values1, 0, sizeof(values1));
+        std::memset(values2, 0, sizeof(values2));
+        std::memset(values3, 0, sizeof(values3));
+        std::memset(values4, 0, sizeof(values4));
+        std::memset(values5, 0, sizeof(values5));
+    }
+
+    void increment(std::atomic<int>* value,
+                   Values* values,
+                   std::memory_order order)
+    {
+        /* Run all threads in the same time */
+        while (!start)
+        {
+            std::this_thread::yield();
+        }
+
+        for (std::size_t i = 0; i < ITERATIONS; ++i)
+        {
+            values[i].x = x.load(order);
+            values[i].y = y.load(order);
+            values[i].z = z.load(order);
+
+            value->store(i+1, order);
+            std::this_thread::yield();
+        }
+    }
+
+    void read(Values* values, std::memory_order order)
+    {
+        while (!start)
+        {
+            std::this_thread::yield();
+        }
+
+        for (std::size_t i = 0; i < ITERATIONS; ++i)
+        {
+            values[i].x = x.load(order);
+            values[i].y = y.load(order);
+            values[i].z = z.load(order);
+            std::this_thread::yield();
+        }
+
+    }
+
+    void print(Values* values)
+    {
+        while (!start)
+        {
+            std::this_thread::yield();
+        }
+
+        for (std::size_t i = 0; i < ITERATIONS; ++i)
+        {
+            if (i)
+            {
+                std::cout << ", ";
+            }
+            std::cout << "[" << values[i].x
+                      << "," << values[i].y
+                      << "," << values[i].z
+                      << "]";
+        }
+        std::cout << std::endl;
+    }
+
+    int main()
+    {
+        std::memory_order order = std::memory_order_relaxed;
+
+        std::thread thread1{ [&] { increment(&x, values1, order); } };
+        std::thread thread2{ [&] { increment(&y, values2, order); } };
+        std::thread thread3{ [&] { increment(&z, values3, order); } };
+        std::thread thread4{ [&] { read(values4, order); } };
+        std::thread thread5{ [&] { read(values5, order); } };
+
+        start = true;
+
+        thread5.join();
+        thread4.join();
+        thread3.join();
+        thread2.join();
+        thread1.join();
+
+        /* First row: first value increases from 0 to 9,
+         * Second row: second value increases from 0 to 9,
+         * Third row: third value increases from 0 to 9
+         */
+        print(values1);
+        print(values2);
+        print(values3);
+        print(values4);
+        print(values5);
+
+        return 0;
+    }
+\end{Code}
+
+
+\section{STL algorithms}
+    Since C++17 we can use STL algorithms with concurrency support. We also have multiple execution policies, all of the needed information can be found on cppreference page.
+Apart from that, \texttt{std::atomic<T>::is\_always\_lock\_free} become \texttt{constexpr} member, so can be called in the compilation phase.
+
+\section{Appendix}
+\subsection{Data race}
+    A \textbf{data race} occurs when two instructions from different threads access the same memory location, at least one of these accesses is a write and
+no synchronization is mandating any particular order among these accesses.
+
+\subsection{Race condition}
+    A \textbf{race condition} can arise in software when a computer program has multiple code paths that are executing at the same time.
+If the multiple code paths take a different amount of time than expected, they can finish in a different order than expected, which can cause software bugs due
+to unanticipated behavior.
+
+\subsection{Deadlock}
+    A \textbf{deadlock} is a state in which each member of a group of actions, is waiting for some other member to release a lock.
+
+\subsection{Livelock}
+    A \textbf{livelock} is similar to a deadlock, except that the states of the processes involved in the livelock constantly change about one another,
+none progressing. Livelock is a special case of resource starvation; the general definition only states that a specific process is not progressing.\newline
+
+    A real-world example of livelock occurs when two people meet in a narrow corridor, and each tries to be polite by moving aside to let the other pass,
+but they end up swaying from side to side without making any progress because they both repeatedly move the same way at the same time.
+\end{document}

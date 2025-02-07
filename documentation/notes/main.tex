@@ -1,0 +1,30 @@
+%% Set document class
+\documentclass[11pt,a4paper,oneside]{book}
+
+%% Preamble
+\include{Headers/Preambles/Preamble}
+
+%% Macros
+\include{Headers/Macros/Statements}
+
+\begin{document}
+%% Cover page (generated separately)
+\includepdf[pages=1, fitpaper=true]{Covers/CoverPage.pdf}
+
+\subfile{Chapters/Preface}
+
+%% Table of contents.
+\tableofcontents
+\newpage
+
+%% Chapters
+\subfile{Chapters/Cpp11}
+\subfile{Chapters/Cpp14}
+\subfile{Chapters/Cpp17}
+\subfile{Chapters/MoveSemantics}
+\subfile{Chapters/Concurrency}
+\subfile{Chapters/Miscellaneous}
+
+%% Bibliography.
+\subfile{Chapters/Bibliography}
+\end{document}

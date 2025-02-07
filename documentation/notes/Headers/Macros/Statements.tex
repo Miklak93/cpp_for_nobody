@@ -1,0 +1,7 @@
+%% Harmony statements
+\newcounter{SharedCounter}[section]
+\renewcommand{\theSharedCounter}{\arabic{chapter}.\arabic{SharedCounter}}
+
+\newenvironment{Enumerate}{\begin{enumerate}\itemsep0em}{\end{enumerate}}
+\newenvironment{Itemize}{\begin{itemize}\itemsep0em}{\end{itemize}}
+\newenvironment{Code}{\VerbatimEnvironment\begin{minted}[fontsize=\small, autogobble]{c++}}{\end{minted}}
